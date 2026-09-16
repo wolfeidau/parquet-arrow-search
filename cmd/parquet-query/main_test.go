@@ -30,7 +30,7 @@ func TestCLIOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := c.options(nil)
+	o := c
 	if o.File != "logs.parquet" || o.Column != "content" || o.Op != "regex" || o.Pattern != "(?i)error|failed" || o.Value != -42 || o.BatchSize != 2 || !o.Explain || !c.Debug {
 		t.Fatalf("incorrect options: %+v", o)
 	}

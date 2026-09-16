@@ -67,8 +67,8 @@ func TestRegex(t *testing.T) {
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			var out bytes.Buffer
-			opts := Options{File: path, Column: "Content", Op: "regex", Pattern: tc.pattern, BatchSize: 2}
-			if err := Run(t.Context(), opts, &out); err != nil {
+			opts := []Option{WithFile(path), WithColumn("Content"), WithOperator("regex"), WithPattern(tc.pattern), WithBatchSize(2)}
+			if err := Run(t.Context(), &out, opts...); err != nil {
 				t.Fatal(err)
 			}
 			var got []int64
@@ -87,9 +87,9 @@ func TestRegex(t *testing.T) {
 			}
 		})
 	}
-	opts := Options{File: path, Column: "Content", Op: "regex", Pattern: "error", BatchSize: 2, Explain: true}
+	opts := []Option{WithFile(path), WithColumn("Content"), WithOperator("regex"), WithPattern("error"), WithBatchSize(2), WithExplain(true)}
 	var out bytes.Buffer
-	if err := Run(t.Context(), opts, &out); err != nil {
+	if err := Run(t.Context(), &out, opts...); err != nil {
 		t.Fatal(err)
 	}
 	if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), regexURN) || !strings.Contains(out.String(), "go_regexp_match") {
@@ -97,9 +97,9 @@ func TestRegex(t *testing.T) {
 	}
 	for _, pattern := range []string{"[", "(?=error)", `(error)\1`} {
 		for _, explain := range []bool{false, true} {
-			opts.Pattern, opts.Explain = pattern, explain
+			opts = append(opts, WithPattern(pattern), WithExplain(explain))
 			out.Reset()
-			if err := Run(t.Context(), opts, &out); err == nil {
+			if err := Run(t.Context(), &out, opts...); err == nil {
 				t.Fatalf("accepted %q", pattern)
 			}
 			if out.Len() != 0 {
@@ -107,8 +107,8 @@ func TestRegex(t *testing.T) {
 			}
 		}
 	}
-	opts.Pattern, opts.Column = "error", "Timestamp"
-	if err := Run(t.Context(), opts, io.Discard); err == nil {
+	opts = append(opts, WithPattern("error"), WithColumn("Timestamp"))
+	if err := Run(t.Context(), io.Discard, opts...); err == nil {
 		t.Fatal("accepted regex on integer column")
 	}
 }

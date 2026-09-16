@@ -40,28 +40,39 @@ func main() {
 		kong.Description("Query a local Parquet file using a Substrait filter. Results go to stdout; logs go to stderr."),
 		kong.Writers(os.Stderr, os.Stderr),
 	)
+
 	level := slog.LevelInfo
 	if args.Debug {
 		level = slog.LevelDebug
 	}
+
 	logger := slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{
-		Level: level, NoColor: os.Getenv("NO_COLOR") != "",
+		Level:   level,
+		NoColor: os.Getenv("NO_COLOR") != "",
 	}))
-	if err := run(args.options(logger)); err != nil {
+
+	if err := run(args.options(logger)...); err != nil {
 		logger.Error("query failed", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
 
-func (c *cli) options(logger *slog.Logger) query.Options {
-	return query.Options{
-		File: c.File, Column: c.Column, Op: c.Op, Pattern: c.Pattern,
-		Value: c.Value, BatchSize: c.BatchSize, Explain: c.Explain, Logger: logger,
+func (c *cli) options(logger *slog.Logger) []query.Option {
+	return []query.Option{
+		query.WithFile(c.File),
+		query.WithColumn(c.Column),
+		query.WithOperator(c.Op),
+		query.WithPattern(c.Pattern),
+		query.WithValue(c.Value),
+		query.WithBatchSize(c.BatchSize),
+		query.WithExplain(c.Explain),
+		query.WithLogger(logger),
 	}
 }
 
-func run(opts query.Options) error {
+func run(opts ...query.Option) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return query.Run(ctx, opts, os.Stdout)
+
+	return query.Run(ctx, os.Stdout, opts...)
 }

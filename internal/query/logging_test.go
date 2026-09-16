@@ -28,7 +28,7 @@ func TestQuerySummary(t *testing.T) {
 			if tc.fail {
 				out = brokenWriter{}
 			}
-			err := Run(t.Context(), Options{File: path, Column: "age", Op: "ge", Value: 30, BatchSize: 2, Explain: tc.explain, Logger: logger}, out)
+			err := Run(t.Context(), out, WithFile(path), WithColumn("age"), WithValue(30), WithBatchSize(2), WithExplain(tc.explain), WithLogger(logger))
 			if (err != nil) != tc.fail {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -80,7 +80,7 @@ func TestLogSamples(t *testing.T) {
 	for _, path := range files {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			var output bytes.Buffer
-			if err := Run(t.Context(), Options{File: path, Column: "content", Op: regexOp, Pattern: "", BatchSize: 128}, &output); err != nil {
+			if err := Run(t.Context(), &output, WithFile(path), WithColumn("content"), WithOperator(regexOp), WithBatchSize(128)); err != nil {
 				t.Fatal(err)
 			}
 			dec := json.NewDecoder(&output)

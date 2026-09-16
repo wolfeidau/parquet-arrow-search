@@ -26,52 +26,44 @@ import (
 
 const regexOp = "regex"
 
-type Options struct {
-	File, Column, Op string
-	Pattern          string
-	Value            int64
-	BatchSize        int64
-	Logger           *slog.Logger // Optional; nil disables query logs.
-	Explain          bool
-}
-
 // Run builds a Substrait plan from the file schema, then explains or executes it.
 // Output is newline-delimited JSON; callers may receive partial output on error.
-func Run(ctx context.Context, opts Options, out io.Writer) (err error) {
+// Defaults: ge comparison against zero, 65,536 rows per batch, no query logs.
+// WithFile and WithColumn are required.
+func Run(ctx context.Context, out io.Writer, options ...Option) (err error) {
+	opts := defaultOptions()
+	for _, option := range options {
+		option(&opts)
+	}
+
 	started := time.Now()
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	var batches, scanned, matched, written int64
-	defer func() {
-		elapsed := time.Since(started)
-		status := "ok"
-		if err != nil {
-			status = "failed"
-		}
-		if opts.Explain {
-			logger.InfoContext(ctx, "plan finished", slog.String("status", status), slog.Duration("elapsed", elapsed))
-			return
-		}
-		var rate float64
-		if elapsed > 0 {
-			rate = float64(scanned) / elapsed.Seconds()
-		}
-		logger.InfoContext(ctx, "query finished", slog.String("status", status),
-			slog.Duration("elapsed", elapsed), slog.Int64("batches", batches),
-			slog.Int64("rows_scanned", scanned), slog.Int64("rows_matched", matched),
-			slog.Int64("rows_written", written), slog.Float64("rows_per_second", rate))
-	}()
-	logger.DebugContext(ctx, "starting query", slog.String("file", opts.File),
-		slog.String("column", opts.Column), slog.String("operator", opts.Op), slog.Int64("batch_size", opts.BatchSize))
 
+	var stats queryStats
+	defer func() {
+		stats.logSummary(ctx, logger, time.Since(started), opts.Explain, err != nil)
+	}()
+
+	logger.DebugContext(ctx, "starting query",
+		slog.String("file", opts.File),
+		slog.String("column", opts.Column),
+		slog.String("operator", opts.Op),
+		slog.Int64("batch_size", opts.BatchSize),
+	)
+
+	if opts.File == "" || opts.Column == "" {
+		return fmt.Errorf("file and column are required")
+	}
 	if opts.BatchSize <= 0 {
 		return fmt.Errorf("batch size must be positive")
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("start query: %w", err)
 	}
+
 	pf, err := file.OpenParquetFile(opts.File, false)
 	if err != nil {
 		return fmt.Errorf("open parquet %q: %w", opts.File, err)
@@ -81,82 +73,128 @@ func Run(ctx context.Context, opts Options, out io.Writer) (err error) {
 			err = errors.Join(err, fmt.Errorf("close parquet %q: %w", opts.File, closeErr))
 		}
 	}()
+
 	reader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{BatchSize: opts.BatchSize}, memory.DefaultAllocator)
 	if err != nil {
 		return fmt.Errorf("create Arrow reader for %q: %w", opts.File, err)
 	}
+
 	schema, err := reader.Schema()
 	if err != nil {
 		return fmt.Errorf("read schema from %q: %w", opts.File, err)
 	}
 	logger.DebugContext(ctx, "read parquet schema", slog.Int("columns", len(schema.Fields())))
+
 	p, err := buildPlan(schema, opts)
 	if err != nil {
 		return fmt.Errorf("build Substrait plan: %w", err)
 	}
+
 	filter := p.GetRoots()[0].Input().(*plan.FilterRel)
 	fn := filter.Condition().(*expr.ScalarFunction)
 	matches, err := compilePredicate(fn)
 	if err != nil {
 		return fmt.Errorf("compile predicate for column %q: %w", opts.Column, err)
 	}
+
 	logger.DebugContext(ctx, "compiled query plan", slog.Duration("setup_elapsed", time.Since(started)))
+
 	if opts.Explain {
-		pb, err := p.ToProto()
-		if err != nil {
-			return fmt.Errorf("convert Substrait plan to protobuf: %w", err)
-		}
-		data, err := (protojson.MarshalOptions{Indent: "  ", UseProtoNames: true}).Marshal(pb)
-		if err != nil {
-			return fmt.Errorf("marshal Substrait plan JSON: %w", err)
-		}
-		if _, err := fmt.Fprintln(out, string(data)); err != nil {
-			return fmt.Errorf("write Substrait plan JSON: %w", err)
-		}
-		return nil
+		return writePlan(out, p)
 	}
+
 	rr, err := reader.GetRecordReader(ctx, nil, nil)
 	if err != nil {
 		return fmt.Errorf("create record reader for %q: %w", opts.File, err)
 	}
 	defer rr.Release()
+
+	stats, err = scanRecords(ctx, rr, matches, out, logger)
+	if err != nil {
+		return fmt.Errorf("scan parquet %q: %w", opts.File, err)
+	}
+
+	return nil
+}
+
+// writePlan writes an inspectable protobuf JSON representation of the plan.
+func writePlan(out io.Writer, p *plan.Plan) error {
+	pb, err := p.ToProto()
+	if err != nil {
+		return fmt.Errorf("convert Substrait plan to protobuf: %w", err)
+	}
+
+	data, err := (protojson.MarshalOptions{Indent: "  ", UseProtoNames: true}).Marshal(pb)
+	if err != nil {
+		return fmt.Errorf("marshal Substrait plan JSON: %w", err)
+	}
+
+	if _, err := fmt.Fprintln(out, string(data)); err != nil {
+		return fmt.Errorf("write Substrait plan JSON: %w", err)
+	}
+
+	return nil
+}
+
+// scanRecords borrows rr; its caller retains ownership and releases it.
+func scanRecords(ctx context.Context, rr pqarrow.RecordReader, matches func(arrow.RecordBatch, int) bool, out io.Writer, logger *slog.Logger) (queryStats, error) {
+	var stats queryStats
 	enc := json.NewEncoder(out)
+
 	for rr.Next() {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("scan parquet %q: %w", opts.File, err)
+			return stats, fmt.Errorf("check scan context: %w", err)
 		}
+
 		record := rr.RecordBatch()
-		batches++
-		logger.DebugContext(ctx, "read Arrow batch", slog.Int64("batch", batches), slog.Int64("rows", record.NumRows()))
+		stats.batches++
+		logger.DebugContext(ctx, "read Arrow batch",
+			slog.Int64("batch", stats.batches),
+			slog.Int64("rows", record.NumRows()),
+		)
+
 		for row := range int(record.NumRows()) {
-			scanned++
+			stats.scanned++
 			// Substrait comparisons propagate null; WHERE only keeps true.
 			if !matches(record, row) {
 				continue
 			}
-			matched++
+
+			stats.matched++
 			result := make(map[string]any, record.NumCols())
-			for i, f := range schema.Fields() {
+			for i, f := range rr.Schema().Fields() {
 				result[f.Name] = record.Column(i).GetOneForMarshal(row)
 			}
+
 			if err := enc.Encode(result); err != nil {
-				return fmt.Errorf("write row: %w", err)
+				return stats, fmt.Errorf("write row: %w", err)
 			}
-			written++
+			stats.written++
 		}
 	}
+
 	if err := rr.Err(); err != nil {
-		return fmt.Errorf("read records from %q: %w", opts.File, err)
+		return stats, fmt.Errorf("read records: %w", err)
 	}
-	return nil
+
+	return stats, nil
 }
 
-func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
-	ops := map[string]string{"eq": "equal", "ne": "not_equal", "gt": "gt", "ge": "gte", "lt": "lt", "le": "lte", regexOp: "go_regexp_match"}
+func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
+	ops := map[string]string{
+		"eq":    "equal",
+		"ne":    "not_equal",
+		"gt":    "gt",
+		"ge":    "gte",
+		"lt":    "lt",
+		"le":    "lte",
+		regexOp: "go_regexp_match",
+	}
 	op, ok := ops[opts.Op]
 	if !ok {
 		return nil, fmt.Errorf("unsupported operator %q (use eq, ne, gt, ge, lt, le, regex)", opts.Op)
 	}
+
 	indices := schema.FieldIndices(opts.Column)
 	if len(indices) != 1 {
 		names := make([]string, len(schema.Fields()))
@@ -165,6 +203,7 @@ func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
 		}
 		return nil, fmt.Errorf("column %q must exist and be unique (available columns: %q; names are case-sensitive)", opts.Column, names)
 	}
+
 	wantType := arrow.INT64
 	if opts.Op == regexOp {
 		wantType = arrow.STRING
@@ -179,10 +218,12 @@ func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
 			return nil, fmt.Errorf("duplicate column name %q", f.Name)
 		}
 		seen[f.Name] = true
+
 		n := types.NullabilityRequired
 		if f.Nullable {
 			n = types.NullabilityNullable
 		}
+
 		var t types.Type
 		switch f.Type.ID() {
 		case arrow.INT64:
@@ -198,9 +239,11 @@ func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
 		default:
 			return nil, fmt.Errorf("unsupported type %s for column %q", f.Type, f.Name)
 		}
+
 		ns.Names = append(ns.Names, f.Name)
 		ns.Struct.Types = append(ns.Struct.Types, t)
 	}
+
 	b := plan.NewBuilderDefault()
 	namespace := extensions.SubstraitDefaultURNPrefix + "functions_comparison"
 	if opts.Op == regexOp {
@@ -211,15 +254,18 @@ func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
 		b = plan.NewBuilder(collection)
 		namespace = regexURN
 	}
+
 	scan := b.NamedScan([]string{opts.File}, ns)
 	columnIndex := indices[0]
 	if columnIndex < 0 || columnIndex > math.MaxInt32 {
 		return nil, fmt.Errorf("column index %d is outside Substrait int32 range", columnIndex)
 	}
+
 	ref, err := b.RootFieldRef(scan, int32(columnIndex))
 	if err != nil {
 		return nil, err
 	}
+
 	var literal expr.Literal
 	if opts.Op == regexOp {
 		literal, err = expr.NewLiteral(opts.Pattern, false)
@@ -229,14 +275,17 @@ func buildPlan(schema *arrow.Schema, opts Options) (*plan.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	condition, err := b.ScalarFn(namespace, op, nil, ref, literal)
 	if err != nil {
 		return nil, err
 	}
+
 	filter, err := b.Filter(scan, condition)
 	if err != nil {
 		return nil, err
 	}
+
 	return b.Plan(filter, ns.Names)
 }
 
@@ -269,11 +318,13 @@ func compilePredicate(fn *expr.ScalarFunction) (func(arrow.RecordBatch, int) boo
 		if err != nil {
 			return nil, fmt.Errorf("invalid regex: %w", err)
 		}
+
 		return func(record arrow.RecordBatch, row int) bool {
 			column := record.Column(field).(*array.String)
 			return !column.IsNull(row) && re.MatchString(column.Value(row))
 		}, nil
 	}
+
 	value := fn.Arg(1).(*expr.PrimitiveLiteral[int64]).Value
 	return func(record arrow.RecordBatch, row int) bool {
 		column := record.Column(field).(*array.Int64)
