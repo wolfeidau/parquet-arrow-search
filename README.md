@@ -1,11 +1,42 @@
 # Parquet Arrow Search
 
-A Go prototype that reads local Parquet files into Apache Arrow batches, builds a
-Substrait query plan, and executes an integer comparison or string regex search. Results stream to
-stdout as newline-delimited JSON.
+A Go prototype demonstrating how to read local Parquet files and query them using
+Apache Arrow and portable Substrait query plans.
 
-CLI errors use structured `slog` logging with `tint` on stderr. Set `NO_COLOR=1`
-to disable log colors. Query results and plan JSON remain on stdout.
+It reads data in batches, executes integer comparisons or regex searches with a
+small custom executor, and streams results as newline-delimited JSON.
+
+## Why Arrow and Substrait?
+
+Searching Parquet logs involves three separate concerns: storing the data,
+representing it in memory, and describing the query. This project uses an open
+format for each:
+
+| Technology | Role | Why it matters |
+| --- | --- | --- |
+| Parquet | Stores compressed, typed columns on disk. | Keeps log archives compact while preserving fields such as timestamps, content, and flags. |
+| [Apache Arrow](https://github.com/apache/arrow-go) | Represents decoded data as typed columns in memory. | Provides a common layout for batch processing and exchanging data between compatible tools. |
+| [Substrait](https://github.com/substrait-io/substrait-go) | Represents queries as typed plans containing operations such as reads and filters. | Makes query intent explicit and inspectable, with a standard representation that compatible engines can exchange. |
+
+### Arrow provides the data representation.
+
+The reader decodes Parquet into Arrow batches, so the query can work through a large file without loading the entire
+dataset at once. Values from a column sit together, providing a foundation for
+efficient column operations. This prototype evaluates predicates over those
+arrays and creates JSON objects only for matching rows.
+
+### Substrait provides the query representation
+
+A search becomes a `Read -> Filter -> Root` plan with explicit field references, types, and functions.
+The executor consumes that plan, and `--explain` exposes it as JSON. Keeping the
+plan separate from execution creates a path to additional query front ends and
+execution backends without inventing a private query format.
+
+Together, they demonstrate a small query pipeline built around reusable data and
+plan formats. Execution here is still implemented by this project: Arrow and
+Substrait do not automatically provide an optimizer or an index. Plan portability
+also depends on engine support; the custom Go regex function requires a matching
+implementation in any other engine.
 
 ## Run
 
@@ -26,6 +57,9 @@ file by changing `--file` and `--column`. Supported operators: `eq`, `ne`, `gt`,
 Add `--explain` to print the Substrait plan instead of scanning rows.
 
 ## Debug logs and performance
+
+CLI logs use structured `slog` logging with `tint` on stderr. Set `NO_COLOR=1`
+to disable log colors. Query results and plan JSON remain on stdout.
 
 Add `--debug` for file/query settings, schema column count, plan setup time, and
 per-batch row counts. Logs go to stderr; redirect stdout to save only results:
