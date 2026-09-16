@@ -1,0 +1,18 @@
+%YAML 1.2
+---
+urn: extension:github.com/wolfeidau/parquet-arrow-search:functions_regex
+scalar_functions:
+  - name: go_regexp_match
+    description: >-
+      Return whether input contains a match for pattern using Go regexp syntax
+      and semantics. Matching is case-sensitive unless inline flags override it.
+      Empty patterns match every non-null input. Null inputs propagate null.
+      Invalid patterns are errors. Lookaround and backreferences are unsupported.
+    impls:
+      - args:
+          - value: string
+            name: input
+          - value: string
+            name: pattern
+        nullability: MIRROR
+        return: boolean

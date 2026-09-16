@@ -1,0 +1,4 @@
+/*.parquet
+/parquet-query
+# Added by goreleaser init:
+dist/
