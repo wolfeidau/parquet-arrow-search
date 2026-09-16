@@ -1,10 +1,18 @@
 # Parquet Arrow Search
 
-A Go prototype demonstrating how to read local Parquet files and query them using
-Apache Arrow and portable Substrait query plans.
+Have a big file of logs and only want the lines that mention an error? This small
+Go project shows how to find them. Here's how the pieces fit together:
 
-It reads data in batches, executes integer comparisons or regex searches with a
-small custom executor, and streams results as newline-delimited JSON.
+1. Start with a box of logs. Parquet keeps them packed into a compact file.
+2. Put a little on the workbench. Arrow lays out a batch of data so the program
+   can work through it without unpacking the whole box at once.
+3. Write down what to find. Substrait turns your search into an instruction sheet
+   that other tools can read if they support the same instructions.
+4. Find the useful bits. This program follows the instructions, prints the matching
+   rows, and tells you how much it searched and how long it took.
+
+You can try it with the included log files—no database server needed.
+[Run your first search](#run), or read on to see why these pieces matter.
 
 ## Why Arrow and Substrait?
 
