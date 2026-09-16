@@ -2,41 +2,61 @@ package main
 
 import (
 	"context"
-	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 
+	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
 	"github.com/wolfeidau/parquet-arrow-search/internal/query"
 )
 
+type cli struct {
+	File      string `required:"" help:"Local Parquet file."`
+	Column    string `required:"" help:"Column to filter (names are case-sensitive)."`
+	Op        string `default:"ge" enum:"eq,ne,gt,ge,lt,le,regex" help:"Comparison: ${enum}."`
+	Pattern   string `help:"Go regex pattern for --op regex (empty matches all non-null strings)."`
+	Value     int64  `default:"0" help:"Integer comparison value."`
+	BatchSize int64  `default:"65536" help:"Maximum rows per Arrow batch."`
+	Explain   bool   `help:"Print Substrait plan JSON instead of rows."`
+	Debug     bool   `help:"Enable debug logging on stderr."`
+}
+
+func (c *cli) Validate() error {
+	if c.BatchSize <= 0 {
+		return fmt.Errorf("--batch-size must be positive")
+	}
+	if c.File == "" || c.Column == "" {
+		return fmt.Errorf("--file and --column must not be empty")
+	}
+	return nil
+}
+
 func main() {
-	var opts query.Options
-	flag.StringVar(&opts.File, "file", "", "local Parquet file (required)")
-	flag.StringVar(&opts.Column, "column", "", "column to filter (required; names are case-sensitive)")
-	flag.StringVar(&opts.Op, "op", "ge", "comparison: eq, ne, gt, ge, lt, le, regex")
-	flag.StringVar(&opts.Pattern, "pattern", "", "Go regex pattern for -op regex (empty matches all non-null strings)")
-	flag.Int64Var(&opts.Value, "value", 0, "integer comparison value")
-	flag.Int64Var(&opts.BatchSize, "batch-size", 65536, "maximum rows per Arrow batch")
-	flag.BoolVar(&opts.Explain, "explain", false, "print Substrait plan JSON instead of rows")
-	debug := flag.Bool("debug", false, "enable debug logging on stderr")
-	flag.Parse()
+	var args cli
+	kong.Parse(&args,
+		kong.Name("parquet-query"),
+		kong.Description("Query a local Parquet file using a Substrait filter. Results go to stdout; logs go to stderr."),
+		kong.Writers(os.Stderr, os.Stderr),
+	)
 	level := slog.LevelInfo
-	if *debug {
+	if args.Debug {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{
 		Level: level, NoColor: os.Getenv("NO_COLOR") != "",
 	}))
-	opts.Logger = logger
-	if opts.File == "" || opts.Column == "" || flag.NArg() != 0 {
-		flag.Usage()
-		os.Exit(2)
-	}
-	if err := run(opts); err != nil {
+	if err := run(args.options(logger)); err != nil {
 		logger.Error("query failed", slog.Any("error", err))
 		os.Exit(1)
+	}
+}
+
+func (c *cli) options(logger *slog.Logger) query.Options {
+	return query.Options{
+		File: c.File, Column: c.Column, Op: c.Op, Pattern: c.Pattern,
+		Value: c.Value, BatchSize: c.BatchSize, Explain: c.Explain, Logger: logger,
 	}
 }
 

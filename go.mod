@@ -3,6 +3,7 @@ module github.com/wolfeidau/parquet-arrow-search
 go 1.27.1
 
 require (
+	github.com/alecthomas/kong v1.16.1
 	github.com/apache/arrow-go/v18 v18.8.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/substrait-io/substrait-go/v8 v8.1.1

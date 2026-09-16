@@ -9,29 +9,32 @@ to disable log colors. Query results and plan JSON remain on stdout.
 
 ## Run
 
+The CLI uses Kong. Run `mise exec -- go run ./cmd/parquet-query --help`
+for generated help. Long options use double dashes (`--file`, `--debug`).
+
 Use Go 1.27.1 (the version declared in `go.mod`; Go can download it automatically).
 
 ```sh
 mise exec -- go run ./cmd/parquet-query \
-  -file testdata/bash-example.parquet \
-  -column content -op regex -pattern '.'
+  --file testdata/bash-example.parquet \
+  --column content --op regex --pattern '.'
 ```
 
 The `testdata/` directory contains Bash, Bazel, and Bun log samples. Query your own
-file by changing `-file` and `-column`. Supported operators: `eq`, `ne`, `gt`, `ge`,
-`lt`, `le`, and `regex`. Use `-batch-size` to change the default 65,536 rows per batch.
-Add `-explain` to print the Substrait plan instead of scanning rows.
+file by changing `--file` and `--column`. Supported operators: `eq`, `ne`, `gt`, `ge`,
+`lt`, `le`, and `regex`. Use `--batch-size` to change the default 65,536 rows per batch.
+Add `--explain` to print the Substrait plan instead of scanning rows.
 
 ## Debug logs and performance
 
-Add `-debug` for file/query settings, schema column count, plan setup time, and
+Add `--debug` for file/query settings, schema column count, plan setup time, and
 per-batch row counts. Logs go to stderr; redirect stdout to save only results:
 
 ```sh
 mise exec -- go run ./cmd/parquet-query \
-  -file testdata/bash-example.parquet \
-  -column content -op regex -pattern '(?i)error|failed|panic' \
-  -debug > matches.jsonl
+  --file testdata/bash-example.parquet \
+  --column content --op regex --pattern '(?i)error|failed|panic' \
+  --debug > matches.jsonl
 ```
 
 Every query logs a summary with status, elapsed time, batches, rows scanned,
@@ -45,12 +48,12 @@ Regex patterns and row contents are not included in debug logs.
 
 ```sh
 mise exec -- go run ./cmd/parquet-query \
-  -file testdata/bash-example.parquet \
-  -column content -op regex -pattern '(?i)error|failed|panic'
+  --file testdata/bash-example.parquet \
+  --column content --op regex --pattern '(?i)error|failed|panic'
 ```
 
 The supplied log files have lowercase column names: `timestamp`, `content`,
-`group`, `flags`. Names are case-sensitive. Add `-explain` to inspect the plan.
+`group`, `flags`. Names are case-sensitive. Add `--explain` to inspect the plan.
 
 Regex searches match anywhere in each value. Patterns use Go `regexp` syntax:
 
@@ -83,7 +86,7 @@ filters, column projection, and row-group pruning before evaluating regex.
 - `internal/query` evaluates the generated plan's expression over Arrow arrays.
   This is a small custom executor: Substrait supplies the plan representation.
 - The named table in the plan is bound to the local file supplied to the CLI.
-  `-explain` reads the file schema but does not scan rows.
+  `--explain` reads the file schema but does not scan rows.
 - Numeric filter columns must be `int64`; regex filter columns must be UTF-8 strings.
   Output schemas support `int64`, `int32`, UTF-8
   strings, booleans, and `float64`. Other types and duplicate names return errors.
