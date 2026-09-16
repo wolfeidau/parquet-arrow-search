@@ -145,3 +145,8 @@ mise exec -- golangci-lint fmt
 mise exec -- go test ./...
 mise exec -- golangci-lint run
 ```
+
+## License
+
+Copyright 2026 Mark Wolfe. Licensed under the Apache License, Version 2.0.
+See [LICENSE](./LICENSE).
