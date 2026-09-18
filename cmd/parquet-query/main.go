@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
@@ -13,22 +14,34 @@ import (
 )
 
 type cli struct {
-	File      string `required:"" help:"Local Parquet file."`
-	Column    string `required:"" help:"Column to filter (names are case-sensitive)."`
-	Op        string `default:"ge" enum:"eq,ne,gt,ge,lt,le,regex" help:"Comparison: ${enum}."`
-	Pattern   string `help:"Go regex pattern for --op regex (empty matches all non-null strings)."`
-	Value     int64  `default:"0" help:"Integer comparison value."`
-	BatchSize int64  `default:"65536" help:"Maximum rows per Arrow batch."`
-	Explain   bool   `help:"Print Substrait plan JSON instead of rows."`
-	Debug     bool   `help:"Enable debug logging on stderr."`
+	File      string  `required:"" help:"Local Parquet file."`
+	Query     *string `help:"Single-table query: SELECT columns FROM logs [WHERE predicate] [LIMIT n]."`
+	Column    *string `help:"Column to filter (required without --query; names are case-sensitive)."`
+	Op        *string `enum:"eq,ne,gt,ge,lt,le,regex" help:"Comparison: ${enum} (default: ge)."`
+	Pattern   *string `help:"Go regex pattern for --op regex (default: empty)."`
+	Value     *int64  `help:"Integer comparison value (default: 0)."`
+	BatchSize int64   `default:"65536" help:"Maximum rows per Arrow batch."`
+	Explain   bool    `help:"Print Substrait plan JSON instead of rows."`
+	Debug     bool    `help:"Enable debug logging on stderr."`
 }
 
 func (c *cli) Validate() error {
 	if c.BatchSize <= 0 {
 		return fmt.Errorf("--batch-size must be positive")
 	}
-	if c.File == "" || c.Column == "" {
-		return fmt.Errorf("--file and --column must not be empty")
+	if c.File == "" {
+		return fmt.Errorf("--file must not be empty")
+	}
+
+	if c.Query != nil {
+		if strings.TrimSpace(*c.Query) == "" {
+			return fmt.Errorf("--query must not be empty")
+		}
+		if c.Column != nil || c.Op != nil || c.Pattern != nil || c.Value != nil {
+			return fmt.Errorf("--query cannot be combined with --column, --op, --pattern, or --value")
+		}
+	} else if c.Column == nil || *c.Column == "" {
+		return fmt.Errorf("--column is required without --query")
 	}
 	return nil
 }
@@ -58,16 +71,28 @@ func main() {
 }
 
 func (c *cli) options(logger *slog.Logger) []query.Option {
-	return []query.Option{
+	opts := []query.Option{
 		query.WithFile(c.File),
-		query.WithColumn(c.Column),
-		query.WithOperator(c.Op),
-		query.WithPattern(c.Pattern),
-		query.WithValue(c.Value),
 		query.WithBatchSize(c.BatchSize),
 		query.WithExplain(c.Explain),
 		query.WithLogger(logger),
 	}
+
+	if c.Query != nil {
+		return append(opts, query.WithQuery(*c.Query))
+	}
+
+	opts = append(opts, query.WithColumn(*c.Column))
+	if c.Op != nil {
+		opts = append(opts, query.WithOperator(*c.Op))
+	}
+	if c.Pattern != nil {
+		opts = append(opts, query.WithPattern(*c.Pattern))
+	}
+	if c.Value != nil {
+		opts = append(opts, query.WithValue(*c.Value))
+	}
+	return opts
 }
 
 func run(opts ...query.Option) error {

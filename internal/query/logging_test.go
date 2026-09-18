@@ -90,7 +90,7 @@ func TestLogSamples(t *testing.T) {
 				if err := dec.Decode(&row); err != nil {
 					t.Fatal(err)
 				}
-				for _, name := range strings.Fields("timestamp content group flags") {
+				for name := range strings.FieldsSeq("timestamp content group flags") {
 					if _, ok := row[name]; !ok {
 						t.Fatalf("missing column %q", name)
 					}

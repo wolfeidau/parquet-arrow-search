@@ -35,7 +35,8 @@ arrays and creates JSON objects only for matching rows.
 
 ### Substrait provides the query representation
 
-A search becomes a `Read -> Filter -> Root` plan with explicit field references, types, and functions.
+A search becomes a plan of reads, filters, column selections, and limits, with
+explicit field references, types, and functions.
 The executor consumes that plan, and `--explain` exposes it as JSON. Keeping the
 plan separate from execution creates a path to additional query front ends and
 execution backends without inventing a private query format.
@@ -56,13 +57,72 @@ Use Go 1.27.1 (the version declared in `go.mod`; Go can download it automaticall
 ```sh
 mise exec -- go run ./cmd/parquet-query \
   --file testdata/bash-example.parquet \
-  --column content --op regex --pattern '.'
+  --query "SELECT content FROM logs LIMIT 10"
 ```
 
 The `testdata/` directory contains Bash, Bazel, and Bun log samples. Query your own
 file by changing `--file` and `--column`. Supported operators: `eq`, `ne`, `gt`, `ge`,
 `lt`, `le`, and `regex`. Use `--batch-size` to change the default 65,536 rows per batch.
 Add `--explain` to print the Substrait plan instead of scanning rows.
+
+## Single-table queries
+
+Use `--query` to search the file as a table named `logs`:
+
+```sh
+mise exec -- go run ./cmd/parquet-query \
+  --file testdata/bun_build_19487_windows-x64-build-cpp.parquet \
+  --query "SELECT timestamp, content FROM logs
+           WHERE regex(content, '(?i)error|failed|panic')
+           LIMIT 100" \
+  --debug
+```
+
+This is a small SQL subset:
+
+```sql
+SELECT * | column, ...
+FROM logs
+[WHERE predicate]
+[LIMIT non-negative-integer]
+```
+
+Examples of supported predicates:
+
+```sql
+SELECT content FROM logs WHERE flags = 0 LIMIT 20
+SELECT timestamp, content FROM logs WHERE content != ''
+SELECT content FROM logs WHERE "group" = 'build'
+SELECT * FROM logs WHERE content IS NULL
+SELECT content FROM logs WHERE regex(content, '\bERROR\b')
+```
+
+- `SELECT` accepts `*` or a list of column names. A filter can reference a column
+  that is not selected. Duplicate selected names are rejected.
+- `WHERE` accepts one comparison (`=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`),
+  `regex(column, 'pattern')`, or `IS NULL` / `IS NOT NULL`.
+- Comparisons support `int32`, `int64`, and string columns. Literals must match
+  the column type; integers are checked for overflow. Null comparisons do not
+  match. Use `IS NULL` to find missing values.
+- Keywords are case-insensitive. Table and column names are case-sensitive.
+  Double-quote column names containing spaces or keywords; double an embedded
+  quote, as in `"odd""name"`. String literals use single quotes, with `''` for an
+  apostrophe. Backslashes are preserved, so regex escapes need no extra SQL layer.
+- `LIMIT` counts matching rows and stops execution early, in file order. A decoded
+  batch may contain extra rows that are never evaluated. `LIMIT 0` validates the
+  query and produces no rows without reading data batches.
+- A trailing semicolon is optional. Compound predicates (`AND`, `OR`, `NOT`),
+  aliases, expressions in `SELECT`, joins, aggregation, sorting, and subqueries
+  are not supported in this first version. Unsupported syntax returns an error.
+
+Add `--explain` to inspect the Substrait plan. The executor derives the predicate,
+selected columns, and limit from that same plan. Query text is parsed with
+[Participle](https://github.com/alecthomas/participle), then checked against the
+Parquet schema before any rows are scanned.
+
+The existing `--column`, `--op`, `--pattern`, and `--value` flags still work as an
+alternative to `--query`. Mixing the two query modes is an error. In Go code,
+use `query.WithQuery(text)` alongside `query.WithFile(path)`.
 
 ## Debug logs and performance
 
@@ -84,7 +144,9 @@ rows matched, rows successfully written, and rows per second. Elapsed time and
 throughput include setup, Parquet decoding, filtering, JSON output, and cleanup;
 a slow output consumer affects these numbers. Failed queries report partial
 counts with `status=failed`. Explain mode reports plan duration, without scan metrics.
-Regex patterns and row contents are not included in debug logs.
+Query text, regex patterns, and row contents are not included in debug logs.
+With `LIMIT`, counts cover only the rows evaluated before stopping, not the
+whole file. Batch counts include batches decoded before that stop.
 
 ## Search log content with regex
 
@@ -117,25 +179,28 @@ Substrait's standard regex functions specify ICU semantics; this extension
 explicitly describes Go semantics instead.
 
 For larger log collections, useful next steps are combined timestamp/group
-filters, column projection, and row-group pruning before evaluating regex.
+filters and row-group pruning before evaluating regex.
 
 ## Design and scope
 
 - [Arrow Go](https://github.com/apache/arrow-go) handles Parquet decoding and Arrow
   memory management.
 - [Substrait Go](https://github.com/substrait-io/substrait-go) builds a typed
-  `Read -> Filter -> Root` plan and serializes it to protobuf JSON.
+  `Read -> Filter -> Project -> Fetch -> Root` plan (omitting unneeded operations)
+  and serializes it to protobuf JSON.
 - `internal/query` evaluates the generated plan's expression over Arrow arrays.
   This is a small custom executor: Substrait supplies the plan representation.
 - The named table in the plan is bound to the local file supplied to the CLI.
   `--explain` reads the file schema but does not scan rows.
-- Numeric filter columns must be `int64`; regex filter columns must be UTF-8 strings.
+- SQL comparisons support `int32`, `int64`, and strings. Numeric filters through
+  the original CLI flags require `int64`. Regex columns must be UTF-8 strings.
   Output schemas support `int64`, `int32`, UTF-8
   strings, booleans, and `float64`. Other types and duplicate names return errors.
-- Null filter values do not match, including for `ne`. All columns are returned.
+- Null comparisons do not match, including for `ne` and `!=`; explicit null tests
+  are available in SQL mode. `SELECT` controls which columns are returned.
 - Files are scanned in batches; matching rows are encoded individually. There is
-  no SQL parser, arbitrary plan import, predicate pushdown, index, projection,
-  aggregation, join, or sorting. This is not a general Substrait execution engine.
+  no arbitrary plan import, predicate pushdown, index, aggregation, join, or
+  sorting. Output projection currently still decodes all source columns. This is not a general Substrait execution engine.
 - Errors can leave partial JSON output. Non-finite floats cannot be JSON-encoded.
 
 ## Check

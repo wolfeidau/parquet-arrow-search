@@ -11,11 +11,7 @@ import (
 
 // writePeopleFixture creates controlled values for comparison and null tests.
 func writePeopleFixture(out io.Writer) error {
-	schema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-		{Name: "name", Type: arrow.BinaryTypes.String},
-		{Name: "age", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
-	}, nil)
+	schema := peopleSchema()
 	b := array.NewRecordBuilder(memory.DefaultAllocator, schema)
 	defer b.Release()
 	b.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3, 4}, nil)
@@ -32,4 +28,12 @@ func writePeopleFixture(out io.Writer) error {
 		return err
 	}
 	return w.Close()
+}
+
+func peopleSchema() *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "name", Type: arrow.BinaryTypes.String},
+		{Name: "age", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
 }
