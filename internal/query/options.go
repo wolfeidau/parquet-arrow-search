@@ -3,6 +3,8 @@ package query
 import "log/slog"
 
 type options struct {
+	Query            *string
+	legacyFilter     bool
 	File, Column, Op string
 	Pattern          string
 	Value            int64
@@ -23,25 +25,37 @@ func WithFile(path string) Option {
 	return func(o *options) { o.File = path }
 }
 
-// WithColumn sets the required, case-sensitive filter column name.
+// WithColumn sets the case-sensitive filter column, required without WithQuery.
 func WithColumn(name string) Option {
-	return func(o *options) { o.Column = name }
+	return func(o *options) {
+		o.Column = name
+		o.legacyFilter = true
+	}
 }
 
 // WithOperator sets eq, ne, gt, ge, lt, le, or regex. The default is ge.
 func WithOperator(op string) Option {
-	return func(o *options) { o.Op = op }
+	return func(o *options) {
+		o.Op = op
+		o.legacyFilter = true
+	}
 }
 
 // WithPattern sets the pattern used with the regex operator.
 // The default empty pattern matches all non-null strings.
 func WithPattern(pattern string) Option {
-	return func(o *options) { o.Pattern = pattern }
+	return func(o *options) {
+		o.Pattern = pattern
+		o.legacyFilter = true
+	}
 }
 
 // WithValue sets the integer comparison value. The default is zero.
 func WithValue(value int64) Option {
-	return func(o *options) { o.Value = value }
+	return func(o *options) {
+		o.Value = value
+		o.legacyFilter = true
+	}
 }
 
 // WithBatchSize sets the positive maximum rows per batch. The default is 65,536.
@@ -57,4 +71,10 @@ func WithLogger(logger *slog.Logger) Option {
 // WithExplain selects plan JSON output instead of scanning. The default is false.
 func WithExplain(explain bool) Option {
 	return func(o *options) { o.Explain = explain }
+}
+
+// WithQuery selects the single-table SQL subset instead of the legacy filter options.
+// It cannot be combined with WithColumn, WithOperator, WithPattern, or WithValue.
+func WithQuery(text string) Option {
+	return func(o *options) { o.Query = &text }
 }
