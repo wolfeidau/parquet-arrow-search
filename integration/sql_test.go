@@ -1,4 +1,4 @@
-package query
+package integration_test
 
 import (
 	"bytes"
@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
-	"github.com/substrait-io/substrait-go/v8/plan"
+	"github.com/wolfeidau/parquet-arrow-search/internal/query"
+	sqlquery "github.com/wolfeidau/parquet-arrow-search/internal/sql"
 )
 
 func TestSQLQueries(t *testing.T) {
@@ -39,7 +39,7 @@ func TestSQLQueries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := Run(t.Context(), &out, WithFile(path), WithQuery(tc.sql), WithBatchSize(1)); err != nil {
+			if _, err := query.Run(t.Context(), &out, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(tc.sql)), query.WithBatchSize(1)); err != nil {
 				t.Fatal(err)
 			}
 			if out.String() != tc.want {
@@ -73,7 +73,7 @@ func TestSQLRejectsInvalidQueriesBeforeOutput(t *testing.T) {
 		t.Run(sql, func(t *testing.T) {
 			for _, explain := range []bool{false, true} {
 				var out bytes.Buffer
-				err := Run(t.Context(), &out, WithFile(path), WithQuery(sql), WithExplain(explain))
+				_, err := query.Run(t.Context(), &out, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(sql)), query.WithExplain(explain))
 				if err == nil {
 					t.Fatal("expected error")
 				}
@@ -85,52 +85,25 @@ func TestSQLRejectsInvalidQueriesBeforeOutput(t *testing.T) {
 	}
 }
 
-func TestSQLPlan(t *testing.T) {
-	opts := defaultOptions()
-	WithQuery("SELECT name, id FROM logs WHERE age >= 30 LIMIT 2")(&opts)
-	p, err := buildPlan(peopleSchema(), opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Inspect the same plan compiled for execution; the predicate's age column
-	// need not be selected, and Project emits just its appended expressions.
-	root := p.GetRoots()[0]
-	fetch := root.Input().(*plan.FetchRel)
-	project := fetch.Input().(*plan.ProjectRel)
-	filter := project.Input().(*plan.FilterRel)
-	if _, ok := filter.Input().(*plan.NamedTableReadRel); !ok {
-		t.Fatal("expected read relation")
-	}
-	if fetch.Count() != 2 || fetch.Offset() != 0 {
-		t.Fatalf("unexpected fetch: %v", fetch)
-	}
-	if got := project.OutputMapping(); len(got) != 2 || got[0] != 3 || got[1] != 4 {
-		t.Fatalf("unexpected output mapping: %v", got)
-	}
-
-	execution, err := compilePlan(p, peopleSchema())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if execution.limit != 2 || len(execution.columns) != 2 || execution.columns[0] != 1 || execution.columns[1] != 0 {
-		t.Fatalf("unexpected execution: %+v", execution)
-	}
-
+func TestSQLExplain(t *testing.T) {
 	var out bytes.Buffer
-	if err := writePlan(&out, p); err != nil {
+	result, err := query.Run(t.Context(), &out, query.WithFile(fixture(t)), query.WithPlanBuilder(sqlquery.Planner("SELECT name, id FROM logs WHERE age >= 30 LIMIT 2")), query.WithExplain(true))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !result.Explain || result.Scanned != 0 || result.Written != 0 {
+		t.Fatalf("unexpected explain result: %+v", result)
 	}
 	if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), "fetch") || !strings.Contains(out.String(), "project") {
 		t.Fatalf("invalid plan JSON: %s", &out)
 	}
 }
 
-func TestSQLLimitSummary(t *testing.T) {
+func TestSQLLimitResult(t *testing.T) {
 	path := fixture(t)
 	for _, tc := range []struct {
 		sql                       string
-		scanned, written, batches int
+		scanned, written, batches int64
 	}{
 		{"SELECT id FROM logs WHERE age > 30 LIMIT 1", 2, 1, 1},
 		{"SELECT id FROM logs LIMIT 3", 3, 3, 2},
@@ -138,21 +111,12 @@ func TestSQLLimitSummary(t *testing.T) {
 		{"SELECT id FROM logs WHERE age > 100 LIMIT 1", 4, 0, 2},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
-			var logs bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&logs, nil))
-			if err := Run(t.Context(), io.Discard, WithFile(path), WithQuery(tc.sql), WithBatchSize(2), WithLogger(logger)); err != nil {
+			result, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(tc.sql)), query.WithBatchSize(2))
+			if err != nil {
 				t.Fatal(err)
 			}
-			var summary struct {
-				Scanned int `json:"rows_scanned"`
-				Written int `json:"rows_written"`
-				Batches int `json:"batches"`
-			}
-			if err := json.Unmarshal(logs.Bytes(), &summary); err != nil {
-				t.Fatal(err)
-			}
-			if summary.Scanned != tc.scanned || summary.Written != tc.written || summary.Batches != tc.batches {
-				t.Fatalf("incorrect summary: %+v", summary)
+			if result.Scanned != tc.scanned || result.Written != tc.written || result.Matched != tc.written || result.Batches != tc.batches || result.Explain || result.Elapsed <= 0 {
+				t.Fatalf("incorrect result: %+v", result)
 			}
 		})
 	}
@@ -160,14 +124,14 @@ func TestSQLLimitSummary(t *testing.T) {
 
 func TestSQLModeAndErrors(t *testing.T) {
 	path := fixture(t)
-	for _, legacy := range []Option{WithColumn("age"), WithOperator("ge"), WithValue(0), WithPattern("")} {
-		if err := Run(t.Context(), io.Discard, WithFile(path), WithQuery("SELECT * FROM logs"), legacy); err == nil {
+	for _, legacy := range []query.Option{query.WithColumn("age"), query.WithOperator("ge"), query.WithValue(0), query.WithPattern("")} {
+		if _, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner("SELECT * FROM logs")), legacy); err == nil {
 			t.Fatal("accepted mixed query modes")
 		}
 	}
 
 	for _, explain := range []bool{false, true} {
-		err := Run(t.Context(), brokenWriter{}, WithFile(path), WithQuery("SELECT * FROM logs"), WithExplain(explain))
+		_, err := query.Run(t.Context(), brokenWriter{}, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner("SELECT * FROM logs")), query.WithExplain(explain))
 		if !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("lost output error: %v", err)
 		}
@@ -176,7 +140,7 @@ func TestSQLModeAndErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var out bytes.Buffer
 	writer := cancelWriter{Writer: &out, cancel: cancel}
-	err := Run(ctx, writer, WithFile(path), WithQuery("SELECT * FROM logs"))
+	_, err := query.Run(ctx, writer, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner("SELECT * FROM logs")))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("lost cancellation: %v", err)
 	}

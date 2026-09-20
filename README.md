@@ -50,27 +50,36 @@ implementation in any other engine.
 ## Run
 
 The CLI uses Kong. Run `mise exec -- go run ./cmd/parquet-query --help`
-for generated help. Long options use double dashes (`--file`, `--debug`).
+for generated help, or add `filter --help` / `query --help` for each command.
+Long options use double dashes (`--file`, `--debug`).
+
+- `filter` searches one column using the original comparison and regex flags.
+- `query` accepts SQL through `--query`.
+- Both commands share `--file`, `--batch-size`, `--explain`, and `--debug`.
+  These flags can appear before or after the command name.
 
 Use Go 1.27.1 (the version declared in `go.mod`; Go can download it automatically).
 
 ```sh
-mise exec -- go run ./cmd/parquet-query \
+mise exec -- go run ./cmd/parquet-query query \
   --file testdata/bash-example.parquet \
   --query "SELECT content FROM logs LIMIT 10"
 ```
 
 The `testdata/` directory contains Bash, Bazel, and Bun log samples. Query your own
-file by changing `--file` and `--column`. Supported operators: `eq`, `ne`, `gt`, `ge`,
-`lt`, `le`, and `regex`. Use `--batch-size` to change the default 65,536 rows per batch.
+file by changing `--file` and the columns in your query. The `filter` command
+supports `eq`, `ne`, `gt`, `ge`, `lt`, `le`, and `regex`. Use `--batch-size` to
+change the default 65,536 rows per batch.
 Add `--explain` to print the Substrait plan instead of scanning rows.
 
 ## Single-table queries
 
-Use `--query` to search the file as a table named `logs`:
+Use the `query` command to search the file as a table named `logs`. This is a
+fixed table alias for any input file; columns come from that file’s schema and
+need not describe logs:
 
 ```sh
-mise exec -- go run ./cmd/parquet-query \
+mise exec -- go run ./cmd/parquet-query query \
   --file testdata/bun_build_19487_windows-x64-build-cpp.parquet \
   --query "SELECT timestamp, content FROM logs
            WHERE regex(content, '(?i)error|failed|panic')
@@ -101,7 +110,7 @@ SELECT content FROM logs WHERE regex(content, '\bERROR\b')
   that is not selected. Duplicate selected names are rejected.
 - `WHERE` accepts one comparison (`=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`),
   `regex(column, 'pattern')`, or `IS NULL` / `IS NOT NULL`.
-- Comparisons support `int32`, `int64`, and string columns. Literals must match
+- Comparisons support signed `int8`, `int16`, `int32`, `int64`, and string columns. Literals must match
   the column type; integers are checked for overflow. Null comparisons do not
   match. Use `IS NULL` to find missing values.
 - Keywords are case-insensitive. Table and column names are case-sensitive.
@@ -120,9 +129,24 @@ selected columns, and limit from that same plan. Query text is parsed with
 [Participle](https://github.com/alecthomas/participle), then checked against the
 Parquet schema before any rows are scanned.
 
-The existing `--column`, `--op`, `--pattern`, and `--value` flags still work as an
-alternative to `--query`. Mixing the two query modes is an error. In Go code,
-use `query.WithQuery(text)` alongside `query.WithFile(path)`.
+The `filter` command accepts `--column`, `--op`, `--pattern`, and `--value`.
+Use `--string-value` for string comparisons, including an empty string:
+
+```sh
+mise exec -- go run ./cmd/parquet-query filter \
+  --file testdata/bash-example.parquet \
+  --column content --op ne --string-value ''
+```
+
+`--value` and `--string-value` are mutually exclusive. Regex uses `--pattern`
+and rejects comparison values; other operators reject `--pattern`. Filter flags belong to
+`filter`; `--query` belongs to `query`. In Go code, use `query.WithPlanBuilder(sql.Planner(text))`
+alongside `query.WithFile(path)`.
+
+`query.Run(ctx, out, options...)` returns `(query.Result, error)`. The result
+contains elapsed time, batch and row counts, and whether the call explained a
+plan. Counts remain available when execution fails. Library callers choose how
+to display or record those metrics; the engine emits only optional debug logs.
 
 ## Debug logs and performance
 
@@ -133,13 +157,13 @@ Add `--debug` for file/query settings, schema column count, plan setup time, and
 per-batch row counts. Logs go to stderr; redirect stdout to save only results:
 
 ```sh
-mise exec -- go run ./cmd/parquet-query \
+mise exec -- go run ./cmd/parquet-query filter \
   --file testdata/bash-example.parquet \
   --column content --op regex --pattern '(?i)error|failed|panic' \
   --debug > matches.jsonl
 ```
 
-Every query logs a summary with status, elapsed time, batches, rows scanned,
+The CLI logs a summary after every query with status, elapsed time, batches, rows scanned,
 rows matched, rows successfully written, and rows per second. Elapsed time and
 throughput include setup, Parquet decoding, filtering, JSON output, and cleanup;
 a slow output consumer affects these numbers. Failed queries report partial
@@ -151,7 +175,7 @@ whole file. Batch counts include batches decoded before that stop.
 ## Search log content with regex
 
 ```sh
-mise exec -- go run ./cmd/parquet-query \
+mise exec -- go run ./cmd/parquet-query filter \
   --file testdata/bash-example.parquet \
   --column content --op regex --pattern '(?i)error|failed|panic'
 ```
@@ -173,7 +197,7 @@ pattern matches all non-null strings. Invalid patterns return an error before an
 output. Lookaround and backreferences are unsupported. Matching does not span rows.
 
 The regex is compiled once per query. The plan declares the custom function
-`go_regexp_match` from [functions_regex.yaml](internal/query/functions_regex.yaml).
+`go_regexp_match` from [functions_regex.yaml](internal/predicate/functions_regex.yaml).
 Other engines need an implementation of that extension to execute these plans.
 Substrait's standard regex functions specify ICU semantics; this extension
 explicitly describes Go semantics instead.
@@ -188,14 +212,20 @@ filters and row-group pruning before evaluating regex.
 - [Substrait Go](https://github.com/substrait-io/substrait-go) builds a typed
   `Read -> Filter -> Project -> Fetch -> Root` plan (omitting unneeded operations)
   and serializes it to protobuf JSON.
-- `internal/query` evaluates the generated plan's expression over Arrow arrays.
+- `internal/sql` parses SQL and builds its Substrait plan.
+- `internal/schema` owns shared schema loading, field validation, and typed literals.
+- `internal/predicate` supplies the shared regex extension.
+- `internal/query` builds flag-based plans and evaluates the generated plan's expression over Arrow arrays.
   This is a small custom executor: Substrait supplies the plan representation.
 - The named table in the plan is bound to the local file supplied to the CLI.
   `--explain` reads the file schema but does not scan rows.
-- SQL comparisons support `int32`, `int64`, and strings. Numeric filters through
-  the original CLI flags require `int64`. Regex columns must be UTF-8 strings.
-  Output schemas support `int64`, `int32`, UTF-8
-  strings, booleans, and `float64`. Other types and duplicate names return errors.
+- Both commands support flat Parquet schemas with UTF-8 strings and signed
+  `int8`, `int16`, `int32`, and `int64` fields, including nullable fields.
+  They use the input's column names and types; no log-specific fields are required.
+  Unsupported types (including unsigned integers and nested fields) and duplicate
+  names return errors. Regex columns must be UTF-8 strings. Existing boolean
+  and `float64` fields can also be selected and checked for null in SQL, but
+  comparisons on those types are unsupported.
 - Null comparisons do not match, including for `ne` and `!=`; explicit null tests
   are available in SQL mode. `SELECT` controls which columns are returned.
 - Files are scanned in batches; matching rows are encoded individually. There is

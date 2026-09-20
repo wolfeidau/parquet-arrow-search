@@ -1,10 +1,16 @@
 package query
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/substrait-io/substrait-go/v8/plan"
+)
 
 type options struct {
-	Query            *string
-	legacyFilter     bool
+	PlanBuilder      func(*arrow.Schema) (*plan.Plan, error)
+	StringValue      *string
+	filterConfigured bool
 	File, Column, Op string
 	Pattern          string
 	Value            int64
@@ -25,11 +31,11 @@ func WithFile(path string) Option {
 	return func(o *options) { o.File = path }
 }
 
-// WithColumn sets the case-sensitive filter column, required without WithQuery.
+// WithColumn sets the case-sensitive filter column, required without WithPlanBuilder.
 func WithColumn(name string) Option {
 	return func(o *options) {
 		o.Column = name
-		o.legacyFilter = true
+		o.filterConfigured = true
 	}
 }
 
@@ -37,7 +43,7 @@ func WithColumn(name string) Option {
 func WithOperator(op string) Option {
 	return func(o *options) {
 		o.Op = op
-		o.legacyFilter = true
+		o.filterConfigured = true
 	}
 }
 
@@ -46,7 +52,7 @@ func WithOperator(op string) Option {
 func WithPattern(pattern string) Option {
 	return func(o *options) {
 		o.Pattern = pattern
-		o.legacyFilter = true
+		o.filterConfigured = true
 	}
 }
 
@@ -54,7 +60,8 @@ func WithPattern(pattern string) Option {
 func WithValue(value int64) Option {
 	return func(o *options) {
 		o.Value = value
-		o.legacyFilter = true
+		o.StringValue = nil
+		o.filterConfigured = true
 	}
 }
 
@@ -73,8 +80,16 @@ func WithExplain(explain bool) Option {
 	return func(o *options) { o.Explain = explain }
 }
 
-// WithQuery selects the single-table SQL subset instead of the legacy filter options.
-// It cannot be combined with WithColumn, WithOperator, WithPattern, or WithValue.
-func WithQuery(text string) Option {
-	return func(o *options) { o.Query = &text }
+// WithPlanBuilder supplies schema-based planning instead of the filter options.
+// It cannot be combined with filter-specific options. A nil builder uses filter mode.
+func WithPlanBuilder(builder func(*arrow.Schema) (*plan.Plan, error)) Option {
+	return func(o *options) { o.PlanBuilder = builder }
+}
+
+// WithStringValue sets a string comparison value instead of the integer value.
+func WithStringValue(value string) Option {
+	return func(o *options) {
+		o.StringValue = &value
+		o.filterConfigured = true
+	}
 }

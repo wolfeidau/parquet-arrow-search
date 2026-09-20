@@ -1,4 +1,5 @@
-package query
+// Package sql parses the single-table SQL subset and builds Substrait plans.
+package sql
 
 import (
 	"fmt"

@@ -10,6 +10,7 @@ import (
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
 	"github.com/substrait-io/substrait-go/v8/plan"
+	"github.com/wolfeidau/parquet-arrow-search/internal/predicate"
 )
 
 type executionPlan struct {
@@ -106,7 +107,7 @@ func compilePredicate(fn *expr.ScalarFunction) (func(arrow.RecordBatch, int) boo
 	}
 	field := referenceIndex(ref)
 
-	if fn.ID().URN == regexURN && fn.Name() == "go_regexp_match" {
+	if fn.ID().URN == predicate.RegexURN && fn.Name() == predicate.RegexFunction {
 		literal, ok := fn.Arg(1).(*expr.PrimitiveLiteral[string])
 		if !ok {
 			return nil, fmt.Errorf("regex requires a string pattern")
@@ -147,6 +148,14 @@ func compilePredicate(fn *expr.ScalarFunction) (func(arrow.RecordBatch, int) boo
 	case *expr.PrimitiveLiteral[int64]:
 		order = func(record arrow.RecordBatch, row int) int {
 			return cmp.Compare(record.Column(field).(*array.Int64).Value(row), literal.Value)
+		}
+	case *expr.PrimitiveLiteral[int8]:
+		order = func(record arrow.RecordBatch, row int) int {
+			return cmp.Compare(record.Column(field).(*array.Int8).Value(row), literal.Value)
+		}
+	case *expr.PrimitiveLiteral[int16]:
+		order = func(record arrow.RecordBatch, row int) int {
+			return cmp.Compare(record.Column(field).(*array.Int16).Value(row), literal.Value)
 		}
 	case *expr.PrimitiveLiteral[int32]:
 		order = func(record arrow.RecordBatch, row int) int {

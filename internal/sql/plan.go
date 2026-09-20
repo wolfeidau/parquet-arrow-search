@@ -1,22 +1,20 @@
-package query
+package sql
 
 import (
 	"fmt"
 	"math"
-	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
 	"github.com/substrait-io/substrait-go/v8/plan"
+	"github.com/wolfeidau/parquet-arrow-search/internal/predicate"
+	"github.com/wolfeidau/parquet-arrow-search/internal/schema"
 )
 
-func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
-	if opts.Query == nil {
-		return buildLegacyPlan(schema, opts)
-	}
-
-	q, err := parseQuery(*opts.Query)
+// BuildPlan validates a query against the file schema and builds its execution plan.
+func BuildPlan(fileSchema *arrow.Schema, text string) (*plan.Plan, error) {
+	q, err := parseQuery(text)
 	if err != nil {
 		return nil, fmt.Errorf("parse SQL: %w", err)
 	}
@@ -26,14 +24,14 @@ func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 		return nil, fmt.Errorf("validate LIMIT: %w", err)
 	}
 
-	ns, err := substraitSchema(schema)
+	ns, err := schema.SubstraitSchema(fileSchema)
 	if err != nil {
 		return nil, fmt.Errorf("convert schema: %w", err)
 	}
 
 	b := plan.NewBuilderDefault()
 	if q.Where != nil && q.Where.Regex != nil {
-		collection, err := regexCollection()
+		collection, err := predicate.RegexCollection()
 		if err != nil {
 			return nil, fmt.Errorf("prepare regex functions: %w", err)
 		}
@@ -42,7 +40,7 @@ func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 
 	var rel plan.Rel = b.NamedScan([]string{"logs"}, ns)
 	if q.Where != nil {
-		condition, err := buildSQLPredicate(b, rel, schema, q.Where)
+		condition, err := buildSQLPredicate(b, rel, fileSchema, q.Where)
 		if err != nil {
 			return nil, fmt.Errorf("build WHERE: %w", err)
 		}
@@ -55,7 +53,7 @@ func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 
 	names := ns.Names
 	if !q.Select.All {
-		rel, names, err = buildProjection(b, rel, schema, q.Select.Columns)
+		rel, names, err = buildProjection(b, rel, fileSchema, q.Select.Columns)
 		if err != nil {
 			return nil, fmt.Errorf("build SELECT: %w", err)
 		}
@@ -75,20 +73,7 @@ func buildPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 	return p, nil
 }
 
-func fieldIndex(schema *arrow.Schema, name string) (int32, error) {
-	indices := schema.FieldIndices(name)
-	if len(indices) != 1 {
-		return 0, fmt.Errorf("column %q must exist and be unique (names are case-sensitive)", name)
-	}
-
-	i := indices[0]
-	if i < 0 || i > math.MaxInt32 {
-		return 0, fmt.Errorf("column index %d is outside Substrait int32 range", i)
-	}
-	return int32(i), nil
-}
-
-func buildProjection(b plan.Builder, input plan.Rel, schema *arrow.Schema, columns []identifier) (plan.Rel, []string, error) {
+func buildProjection(b plan.Builder, input plan.Rel, fileSchema *arrow.Schema, columns []identifier) (plan.Rel, []string, error) {
 	names := make([]string, 0, len(columns))
 	refs := make([]expr.Expression, 0, len(columns))
 	mapping := make([]int32, 0, len(columns))
@@ -101,7 +86,7 @@ func buildProjection(b plan.Builder, input plan.Rel, schema *arrow.Schema, colum
 		}
 		seen[name] = true
 
-		index, err := fieldIndex(schema, name)
+		index, err := schema.FieldIndex(fileSchema, name)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve selected column: %w", err)
 		}
@@ -133,7 +118,7 @@ func buildProjection(b plan.Builder, input plan.Rel, schema *arrow.Schema, colum
 	return rel, names, nil
 }
 
-func buildSQLPredicate(b plan.Builder, input plan.Rel, schema *arrow.Schema, p *sqlPredicate) (*expr.ScalarFunction, error) {
+func buildSQLPredicate(b plan.Builder, input plan.Rel, fileSchema *arrow.Schema, p *sqlPredicate) (*expr.ScalarFunction, error) {
 	name := ""
 	if p.Regex != nil {
 		name = p.Regex.Column.name()
@@ -141,7 +126,7 @@ func buildSQLPredicate(b plan.Builder, input plan.Rel, schema *arrow.Schema, p *
 		name = p.Column.Column.name()
 	}
 
-	index, err := fieldIndex(schema, name)
+	index, err := schema.FieldIndex(fileSchema, name)
 	if err != nil {
 		return nil, fmt.Errorf("resolve predicate column: %w", err)
 	}
@@ -153,16 +138,12 @@ func buildSQLPredicate(b plan.Builder, input plan.Rel, schema *arrow.Schema, p *
 
 	namespace := extensions.SubstraitDefaultURNPrefix + "functions_comparison"
 	if p.Regex != nil {
-		if schema.Field(int(index)).Type.ID() != arrow.STRING {
-			return nil, fmt.Errorf("regex requires a string column, got %s", schema.Field(int(index)).Type)
-		}
-
-		literal, err := expr.NewLiteral(unquoteSQL(p.Regex.Pattern), false)
+		literal, err := schema.StringLiteral(fileSchema.Field(int(index)), unquoteSQL(p.Regex.Pattern))
 		if err != nil {
 			return nil, fmt.Errorf("build regex literal: %w", err)
 		}
 
-		fn, err := b.ScalarFn(regexURN, "go_regexp_match", nil, ref, literal)
+		fn, err := b.ScalarFn(predicate.RegexURN, predicate.RegexFunction, nil, ref, literal)
 		if err != nil {
 			return nil, fmt.Errorf("build regex function: %w", err)
 		}
@@ -183,12 +164,12 @@ func buildSQLPredicate(b plan.Builder, input plan.Rel, schema *arrow.Schema, p *
 	}
 
 	comparison := p.Column.Comparison
-	literal, err := comparisonLiteral(schema.Field(int(index)), comparison.Value)
+	literal, err := comparisonLiteral(fileSchema.Field(int(index)), comparison.Value)
 	if err != nil {
 		return nil, fmt.Errorf("validate comparison literal: %w", err)
 	}
 
-	functions := map[string]string{"=": functionEqual, "!=": functionNotEqual, "<>": functionNotEqual, "<": "lt", "<=": functionLTE, ">": "gt", ">=": functionGTE}
+	functions := map[string]string{"=": "equal", "!=": "not_equal", "<>": "not_equal", "<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}
 	fn, err := b.ScalarFn(namespace, functions[comparison.Op], nil, ref, literal)
 	if err != nil {
 		return nil, fmt.Errorf("build comparison: %w", err)
@@ -197,44 +178,23 @@ func buildSQLPredicate(b plan.Builder, input plan.Rel, schema *arrow.Schema, p *
 }
 
 func comparisonLiteral(field arrow.Field, value sqlLiteral) (expr.Literal, error) {
-	var literal expr.Literal
-	var err error
-
-	switch field.Type.ID() {
-	case arrow.STRING:
-		if value.String == nil {
-			return nil, fmt.Errorf("column %q requires a string literal", field.Name)
+	if value.String != nil {
+		literal, err := schema.StringLiteral(field, unquoteSQL(*value.String))
+		if err != nil {
+			return nil, fmt.Errorf("build string literal: %w", err)
 		}
-		literal, err = expr.NewLiteral(unquoteSQL(*value.String), false)
-	case arrow.INT32, arrow.INT64:
-		if value.Integer == nil {
-			return nil, fmt.Errorf("column %q requires an integer literal", field.Name)
-		}
-
-		bits := 64
-		if field.Type.ID() == arrow.INT32 {
-			bits = 32
-		}
-		n, parseErr := strconv.ParseInt(*value.Integer, 10, bits)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse integer for column %q: %w", field.Name, parseErr)
-		}
-
-		if bits == 32 {
-			// ParseInt has checked the target range; make it explicit for static analysis.
-			if n < math.MinInt32 || n > math.MaxInt32 {
-				return nil, fmt.Errorf("integer out of int32 range")
-			}
-			literal, err = expr.NewLiteral(int32(n), false)
-		} else {
-			literal, err = expr.NewLiteral(n, false)
-		}
-	default:
-		return nil, fmt.Errorf("comparisons support int32, int64, and string columns; %q is %s", field.Name, field.Type)
+		return literal, nil
 	}
-
+	literal, err := schema.IntegerLiteral(field, *value.Integer)
 	if err != nil {
-		return nil, fmt.Errorf("build literal for column %q: %w", field.Name, err)
+		return nil, fmt.Errorf("build integer literal: %w", err)
 	}
 	return literal, nil
+}
+
+// Planner binds query text to a schema-based plan builder for the shared executor.
+func Planner(text string) func(*arrow.Schema) (*plan.Plan, error) {
+	return func(schema *arrow.Schema) (*plan.Plan, error) {
+		return BuildPlan(schema, text)
+	}
 }

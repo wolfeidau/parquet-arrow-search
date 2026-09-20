@@ -1,4 +1,4 @@
-package query
+package integration_test
 
 import (
 	"bytes"
@@ -12,6 +12,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/wolfeidau/parquet-arrow-search/internal/query"
+	sqlquery "github.com/wolfeidau/parquet-arrow-search/internal/sql"
 )
 
 func sqlTypesFixture(t *testing.T) string {
@@ -72,7 +74,7 @@ func TestSQLTypesAndQuoting(t *testing.T) {
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := Run(t.Context(), &out, WithFile(path), WithQuery(tc.sql), WithBatchSize(2)); err != nil {
+			if _, err := query.Run(t.Context(), &out, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(tc.sql)), query.WithBatchSize(2)); err != nil {
 				t.Fatal(err)
 			}
 			if out.String() != tc.want {
@@ -87,7 +89,7 @@ func TestSQLTypesAndQuoting(t *testing.T) {
 		`SELECT * FROM logs WHERE "select" = 1`,
 		`SELECT * FROM logs WHERE "odd""name" = 1`,
 	} {
-		if err := Run(t.Context(), io.Discard, WithFile(path), WithQuery(sql)); err == nil {
+		if _, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(sql))); err == nil {
 			t.Errorf("accepted %s", sql)
 		}
 	}

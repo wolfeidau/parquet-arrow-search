@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -11,18 +12,29 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
 	"github.com/wolfeidau/parquet-arrow-search/internal/query"
+	"github.com/wolfeidau/parquet-arrow-search/internal/sql"
 )
 
 type cli struct {
-	File      string  `required:"" help:"Local Parquet file."`
-	Query     *string `help:"Single-table query: SELECT columns FROM logs [WHERE predicate] [LIMIT n]."`
-	Column    *string `help:"Column to filter (required without --query; names are case-sensitive)."`
-	Op        *string `enum:"eq,ne,gt,ge,lt,le,regex" help:"Comparison: ${enum} (default: ge)."`
-	Pattern   *string `help:"Go regex pattern for --op regex (default: empty)."`
-	Value     *int64  `help:"Integer comparison value (default: 0)."`
-	BatchSize int64   `default:"65536" help:"Maximum rows per Arrow batch."`
-	Explain   bool    `help:"Print Substrait plan JSON instead of rows."`
-	Debug     bool    `help:"Enable debug logging on stderr."`
+	File      string `required:"" help:"Local Parquet file."`
+	BatchSize int64  `default:"65536" help:"Maximum rows per Arrow batch."`
+	Explain   bool   `help:"Print Substrait plan JSON instead of rows."`
+	Debug     bool   `help:"Enable debug logging on stderr."`
+
+	Filter filterCommand `cmd:"" help:"Filter one column using comparison or regex flags."`
+	Query  queryCommand  `cmd:"" help:"Query selected columns using a small SQL subset."`
+}
+
+type filterCommand struct {
+	Column      string  `required:"" help:"Column to filter (names are case-sensitive)."`
+	Op          string  `default:"ge" enum:"eq,ne,gt,ge,lt,le,regex" help:"Comparison: ${enum}."`
+	Pattern     *string `help:"Go regex pattern for --op regex (default: empty)."`
+	Value       *int64  `xor:"value" help:"Integer comparison value (default: 0)."`
+	StringValue *string `xor:"value" help:"String comparison value; mutually exclusive with --value."`
+}
+
+type queryCommand struct {
+	Query string `required:"" help:"SELECT columns FROM logs [WHERE predicate] [LIMIT n]."`
 }
 
 func (c *cli) Validate() error {
@@ -33,16 +45,28 @@ func (c *cli) Validate() error {
 		return fmt.Errorf("--file must not be empty")
 	}
 
-	if c.Query != nil {
-		if strings.TrimSpace(*c.Query) == "" {
-			return fmt.Errorf("--query must not be empty")
-		}
-		if c.Column != nil || c.Op != nil || c.Pattern != nil || c.Value != nil {
-			return fmt.Errorf("--query cannot be combined with --column, --op, --pattern, or --value")
-		}
-	} else if c.Column == nil || *c.Column == "" {
-		return fmt.Errorf("--column is required without --query")
+	return nil
+}
+
+func (c *filterCommand) Validate() error {
+	if c.Column == "" {
+		return fmt.Errorf("--column must not be empty")
 	}
+	if c.Op == "regex" && (c.Value != nil || c.StringValue != nil) {
+		return fmt.Errorf("--op regex cannot be combined with --value or --string-value")
+	}
+	if c.Op != "regex" && c.Pattern != nil {
+		return fmt.Errorf("--pattern requires --op regex")
+	}
+
+	return nil
+}
+
+func (c *queryCommand) Validate() error {
+	if strings.TrimSpace(c.Query) == "" {
+		return fmt.Errorf("--query must not be empty")
+	}
+
 	return nil
 }
 
@@ -64,7 +88,7 @@ func main() {
 		NoColor: os.Getenv("NO_COLOR") != "",
 	}))
 
-	if err := run(args.options(logger)...); err != nil {
+	if err := run(logger, args.options(logger)...); err != nil {
 		logger.Error("query failed", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -78,26 +102,40 @@ func (c *cli) options(logger *slog.Logger) []query.Option {
 		query.WithLogger(logger),
 	}
 
-	if c.Query != nil {
-		return append(opts, query.WithQuery(*c.Query))
+	if c.Query.Query != "" {
+		return append(opts, query.WithPlanBuilder(sql.Planner(c.Query.Query)))
 	}
 
-	opts = append(opts, query.WithColumn(*c.Column))
-	if c.Op != nil {
-		opts = append(opts, query.WithOperator(*c.Op))
+	opts = append(opts,
+		query.WithColumn(c.Filter.Column),
+		query.WithOperator(c.Filter.Op),
+	)
+	if c.Filter.Pattern != nil {
+		opts = append(opts, query.WithPattern(*c.Filter.Pattern))
 	}
-	if c.Pattern != nil {
-		opts = append(opts, query.WithPattern(*c.Pattern))
+	if c.Filter.Value != nil {
+		opts = append(opts, query.WithValue(*c.Filter.Value))
 	}
-	if c.Value != nil {
-		opts = append(opts, query.WithValue(*c.Value))
+	if c.Filter.StringValue != nil {
+		opts = append(opts, query.WithStringValue(*c.Filter.StringValue))
 	}
 	return opts
 }
 
-func run(opts ...query.Option) error {
+func run(logger *slog.Logger, opts ...query.Option) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	return query.Run(ctx, os.Stdout, opts...)
+	return execute(ctx, os.Stdout, logger, opts...)
+}
+
+// execute keeps presentation at the CLI boundary while preserving partial results.
+func execute(ctx context.Context, out io.Writer, logger *slog.Logger, opts ...query.Option) error {
+	result, err := query.Run(ctx, out, opts...)
+	logSummary(ctx, logger, result, err != nil)
+	if err != nil {
+		return fmt.Errorf("execute query: %w", err)
+	}
+
+	return nil
 }

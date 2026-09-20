@@ -2,13 +2,14 @@ package query
 
 import (
 	"fmt"
-	"math"
+	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
 	"github.com/substrait-io/substrait-go/v8/plan"
-	"github.com/substrait-io/substrait-go/v8/types"
+	"github.com/wolfeidau/parquet-arrow-search/internal/predicate"
+	"github.com/wolfeidau/parquet-arrow-search/internal/schema"
 )
 
 const (
@@ -18,7 +19,7 @@ const (
 	functionLTE      = "lte"
 )
 
-func buildLegacyPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
+func buildFilterPlan(fileSchema *arrow.Schema, opts options) (*plan.Plan, error) {
 	ops := map[string]string{
 		"eq":    functionEqual,
 		"ne":    functionNotEqual,
@@ -26,30 +27,19 @@ func buildLegacyPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 		"ge":    functionGTE,
 		"lt":    "lt",
 		"le":    functionLTE,
-		regexOp: "go_regexp_match",
+		regexOp: predicate.RegexFunction,
 	}
 	op, ok := ops[opts.Op]
 	if !ok {
 		return nil, fmt.Errorf("unsupported operator %q (use eq, ne, gt, ge, lt, le, regex)", opts.Op)
 	}
 
-	indices := schema.FieldIndices(opts.Column)
-	if len(indices) != 1 {
-		names := make([]string, len(schema.Fields()))
-		for i, f := range schema.Fields() {
-			names[i] = f.Name
-		}
-		return nil, fmt.Errorf("column %q must exist and be unique (available columns: %q; names are case-sensitive)", opts.Column, names)
+	index, err := schema.FieldIndex(fileSchema, opts.Column)
+	if err != nil {
+		return nil, fmt.Errorf("resolve filter column: %w", err)
 	}
-
-	wantType := arrow.INT64
-	if opts.Op == regexOp {
-		wantType = arrow.STRING
-	}
-	if schema.Field(indices[0]).Type.ID() != wantType {
-		return nil, fmt.Errorf("operator %q requires %s column, got %s for %q", opts.Op, wantType, schema.Field(indices[0]).Type, opts.Column)
-	}
-	ns, err := substraitSchema(schema)
+	field := fileSchema.Field(int(index))
+	ns, err := schema.SubstraitSchema(fileSchema)
 	if err != nil {
 		return nil, fmt.Errorf("convert schema: %w", err)
 	}
@@ -57,30 +47,28 @@ func buildLegacyPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 	b := plan.NewBuilderDefault()
 	namespace := extensions.SubstraitDefaultURNPrefix + "functions_comparison"
 	if opts.Op == regexOp {
-		collection, err := regexCollection()
+		collection, err := predicate.RegexCollection()
 		if err != nil {
 			return nil, fmt.Errorf("prepare regex functions: %w", err)
 		}
 		b = plan.NewBuilder(collection)
-		namespace = regexURN
+		namespace = predicate.RegexURN
 	}
 
 	scan := b.NamedScan([]string{opts.File}, ns)
-	columnIndex := indices[0]
-	if columnIndex < 0 || columnIndex > math.MaxInt32 {
-		return nil, fmt.Errorf("column index %d is outside Substrait int32 range", columnIndex)
-	}
-
-	ref, err := b.RootFieldRef(scan, int32(columnIndex))
+	ref, err := b.RootFieldRef(scan, index)
 	if err != nil {
 		return nil, fmt.Errorf("reference filter column: %w", err)
 	}
 
 	var literal expr.Literal
-	if opts.Op == regexOp {
-		literal, err = expr.NewLiteral(opts.Pattern, false)
-	} else {
-		literal, err = expr.NewLiteral(opts.Value, false)
+	switch {
+	case opts.Op == regexOp:
+		literal, err = schema.StringLiteral(field, opts.Pattern)
+	case opts.StringValue != nil:
+		literal, err = schema.StringLiteral(field, *opts.StringValue)
+	default:
+		literal, err = schema.IntegerLiteral(field, strconv.FormatInt(opts.Value, 10))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("build filter literal: %w", err)
@@ -103,39 +91,20 @@ func buildLegacyPlan(schema *arrow.Schema, opts options) (*plan.Plan, error) {
 	return p, nil
 }
 
-func substraitSchema(schema *arrow.Schema) (types.NamedStruct, error) {
-	ns := types.NamedStruct{Struct: types.StructType{Nullability: types.NullabilityRequired}}
-	seen := make(map[string]bool)
-	for _, f := range schema.Fields() {
-		if seen[f.Name] {
-			return types.NamedStruct{}, fmt.Errorf("duplicate column name %q", f.Name)
+func buildPlan(fileSchema *arrow.Schema, opts options) (*plan.Plan, error) {
+	if opts.PlanBuilder != nil {
+		p, err := opts.PlanBuilder(fileSchema)
+		if err != nil {
+			return nil, fmt.Errorf("build custom plan: %w", err)
 		}
-		seen[f.Name] = true
-
-		n := types.NullabilityRequired
-		if f.Nullable {
-			n = types.NullabilityNullable
+		if p == nil {
+			return nil, fmt.Errorf("plan builder returned a nil plan")
 		}
-
-		var t types.Type
-		switch f.Type.ID() {
-		case arrow.INT64:
-			t = &types.Int64Type{Nullability: n}
-		case arrow.INT32:
-			t = &types.Int32Type{Nullability: n}
-		case arrow.STRING:
-			t = &types.StringType{Nullability: n}
-		case arrow.BOOL:
-			t = &types.BooleanType{Nullability: n}
-		case arrow.FLOAT64:
-			t = &types.Float64Type{Nullability: n}
-		default:
-			return types.NamedStruct{}, fmt.Errorf("unsupported type %s for column %q", f.Type, f.Name)
-		}
-
-		ns.Names = append(ns.Names, f.Name)
-		ns.Struct.Types = append(ns.Struct.Types, t)
+		return p, nil
 	}
-
-	return ns, nil
+	p, err := buildFilterPlan(fileSchema, opts)
+	if err != nil {
+		return nil, fmt.Errorf("build filter plan: %w", err)
+	}
+	return p, nil
 }
