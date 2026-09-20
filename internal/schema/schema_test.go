@@ -105,8 +105,7 @@ func TestIntegerLiteral(t *testing.T) {
 			}
 			for _, value := range []string{tc.under, tc.over, "1.5", "abc"} {
 				_, err := IntegerLiteral(field, value)
-				var numberErr *strconv.NumError
-				if !errors.As(err, &numberErr) {
+				if _, ok := errors.AsType[*strconv.NumError](err); !ok {
 					t.Fatalf("expected wrapped parse error for %q, got %v", value, err)
 				}
 			}
