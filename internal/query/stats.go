@@ -1,41 +1,14 @@
 package query
 
-import (
-	"context"
-	"log/slog"
-	"time"
-)
+import "time"
 
-type queryStats struct {
-	batches, scanned, matched, written int64
-}
-
-func (s queryStats) logSummary(ctx context.Context, logger *slog.Logger, elapsed time.Duration, explain, failed bool) {
-	status := "ok"
-	if failed {
-		status = "failed"
-	}
-
-	if explain {
-		logger.InfoContext(ctx, "plan finished",
-			slog.String("status", status),
-			slog.Duration("elapsed", elapsed),
-		)
-		return
-	}
-
-	var rate float64
-	if elapsed > 0 {
-		rate = float64(s.scanned) / elapsed.Seconds()
-	}
-
-	logger.InfoContext(ctx, "query finished",
-		slog.String("status", status),
-		slog.Duration("elapsed", elapsed),
-		slog.Int64("batches", s.batches),
-		slog.Int64("rows_scanned", s.scanned),
-		slog.Int64("rows_matched", s.matched),
-		slog.Int64("rows_written", s.written),
-		slog.Float64("rows_per_second", rate),
-	)
+// Result describes completed work, including partial counts when Run returns an error.
+// Elapsed includes setup, execution, output, and resource cleanup.
+type Result struct {
+	Elapsed time.Duration
+	Batches int64 // Arrow batches visited.
+	Scanned int64 // Rows evaluated.
+	Matched int64 // Matching rows, including a row whose output failed.
+	Written int64 // Rows successfully written.
+	Explain bool  // Plan-only mode; scan counts are zero.
 }

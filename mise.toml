@@ -6,3 +6,11 @@ lockfile = true
 go = "1.27.1"
 golangci-lint = "2.13.2"
 goreleaser = "2.18.1"
+
+[tasks.fix]
+description = "Modernize, format, and auto-fix Go code"
+run = [
+  "go fix ./...",
+  "golangci-lint fmt",
+  "golangci-lint run --fix",
+]

@@ -1,4 +1,4 @@
-package query
+package integration_test
 
 import (
 	"bytes"
@@ -14,6 +14,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/wolfeidau/parquet-arrow-search/internal/filter"
+	"github.com/wolfeidau/parquet-arrow-search/internal/predicate"
+	"github.com/wolfeidau/parquet-arrow-search/internal/query"
 )
 
 func TestRegex(t *testing.T) {
@@ -67,8 +70,8 @@ func TestRegex(t *testing.T) {
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			var out bytes.Buffer
-			opts := []Option{WithFile(path), WithColumn("Content"), WithOperator("regex"), WithPattern(tc.pattern), WithBatchSize(2)}
-			if err := Run(t.Context(), &out, opts...); err != nil {
+			opts := []query.Option{query.WithFile(path), query.WithPlanBuilder(filter.Planner(filter.Config{Column: "Content", Op: "regex", Pattern: tc.pattern})), query.WithBatchSize(2)}
+			if _, err := query.Run(t.Context(), &out, opts...); err != nil {
 				t.Fatal(err)
 			}
 			var got []int64
@@ -87,19 +90,19 @@ func TestRegex(t *testing.T) {
 			}
 		})
 	}
-	opts := []Option{WithFile(path), WithColumn("Content"), WithOperator("regex"), WithPattern("error"), WithBatchSize(2), WithExplain(true)}
+	opts := []query.Option{query.WithFile(path), query.WithPlanBuilder(filter.Planner(filter.Config{Column: "Content", Op: "regex", Pattern: "error"})), query.WithBatchSize(2), query.WithExplain(true)}
 	var out bytes.Buffer
-	if err := Run(t.Context(), &out, opts...); err != nil {
+	if _, err := query.Run(t.Context(), &out, opts...); err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), regexURN) || !strings.Contains(out.String(), "go_regexp_match") {
+	if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), predicate.RegexURN) || !strings.Contains(out.String(), "go_regexp_match") {
 		t.Fatalf("invalid regex plan: %s", &out)
 	}
 	for _, pattern := range []string{"[", "(?=error)", `(error)\1`} {
 		for _, explain := range []bool{false, true} {
-			opts = append(opts, WithPattern(pattern), WithExplain(explain))
+			opts = append(opts, query.WithPlanBuilder(filter.Planner(filter.Config{Column: "Content", Op: "regex", Pattern: pattern})), query.WithExplain(explain))
 			out.Reset()
-			if err := Run(t.Context(), &out, opts...); err == nil {
+			if _, err := query.Run(t.Context(), &out, opts...); err == nil {
 				t.Fatalf("accepted %q", pattern)
 			}
 			if out.Len() != 0 {
@@ -107,8 +110,8 @@ func TestRegex(t *testing.T) {
 			}
 		}
 	}
-	opts = append(opts, WithPattern("error"), WithColumn("Timestamp"))
-	if err := Run(t.Context(), io.Discard, opts...); err == nil {
+	opts = append(opts, query.WithPlanBuilder(filter.Planner(filter.Config{Column: "Timestamp", Op: "regex", Pattern: "error"})))
+	if _, err := query.Run(t.Context(), io.Discard, opts...); err == nil {
 		t.Fatal("accepted regex on integer column")
 	}
 }

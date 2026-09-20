@@ -1,47 +1,30 @@
 package query
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/substrait-io/substrait-go/v8/plan"
+)
 
 type options struct {
-	File, Column, Op string
-	Pattern          string
-	Value            int64
-	BatchSize        int64
-	Logger           *slog.Logger
-	Explain          bool
+	PlanBuilder func(*arrow.Schema) (*plan.Plan, error)
+	File        string
+	BatchSize   int64
+	Logger      *slog.Logger
+	Explain     bool
 }
 
 // Option configures a query. Options are applied in order; the last value wins.
 type Option func(*options)
 
 func defaultOptions() options {
-	return options{Op: "ge", BatchSize: 65536}
+	return options{BatchSize: 65536}
 }
 
 // WithFile sets the required local Parquet file.
 func WithFile(path string) Option {
 	return func(o *options) { o.File = path }
-}
-
-// WithColumn sets the required, case-sensitive filter column name.
-func WithColumn(name string) Option {
-	return func(o *options) { o.Column = name }
-}
-
-// WithOperator sets eq, ne, gt, ge, lt, le, or regex. The default is ge.
-func WithOperator(op string) Option {
-	return func(o *options) { o.Op = op }
-}
-
-// WithPattern sets the pattern used with the regex operator.
-// The default empty pattern matches all non-null strings.
-func WithPattern(pattern string) Option {
-	return func(o *options) { o.Pattern = pattern }
-}
-
-// WithValue sets the integer comparison value. The default is zero.
-func WithValue(value int64) Option {
-	return func(o *options) { o.Value = value }
 }
 
 // WithBatchSize sets the positive maximum rows per batch. The default is 65,536.
@@ -57,4 +40,10 @@ func WithLogger(logger *slog.Logger) Option {
 // WithExplain selects plan JSON output instead of scanning. The default is false.
 func WithExplain(explain bool) Option {
 	return func(o *options) { o.Explain = explain }
+}
+
+// WithPlanBuilder supplies the required schema-based plan builder.
+// A nil builder is rejected by Run.
+func WithPlanBuilder(builder func(*arrow.Schema) (*plan.Plan, error)) Option {
+	return func(o *options) { o.PlanBuilder = builder }
 }
