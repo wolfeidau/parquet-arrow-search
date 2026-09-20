@@ -2,8 +2,10 @@
 
 - Use the tools pinned in `mise.toml` and `mise.lock`: run commands through
   `mise exec --`. Run `mise install` if those tools are missing.
-- Before finishing Go changes, run `mise exec -- golangci-lint fmt`,
-  `mise exec -- go test ./...`, and `mise exec -- golangci-lint run`.
+- Before finishing Go changes, run `mise run fix` to apply Go modernizations,
+  formatting, and lint auto-fixes with the pinned tools. Review the generated
+  diff, then run `mise exec -- go test ./...` and
+  `mise exec -- golangci-lint run` to verify the result.
   `.golangci.yml` defines the formatting and lint rules; fix issues without
   weakening the configuration or adding blanket suppressions.
 - GoReleaser builds release binaries and archives using `.goreleaser.yaml`.
