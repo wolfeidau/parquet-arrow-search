@@ -148,6 +148,23 @@ contains elapsed time, batch and row counts, and whether the call explained a
 plan. Counts remain available when execution fails. Library callers choose how
 to display or record those metrics; the engine emits only optional debug logs.
 
+Both front ends supply a plan builder to the same executor:
+
+```go
+result, err := query.Run(ctx, out,
+    query.WithFile(path),
+    query.WithPlanBuilder(filter.Planner(filter.Config{
+        Column:  "content",
+        Op:      "regex",
+        Pattern: "(?i)error|failed|panic",
+    })),
+)
+```
+
+For SQL, replace the builder with `sql.Planner("SELECT * FROM logs LIMIT 10")`.
+The executor handles file reading, batches, and output; it does not parse SQL or
+interpret filter settings. These packages live under `internal` for this prototype.
+
 ## Debug logs and performance
 
 CLI logs use structured `slog` logging with `tint` on stderr. Set `NO_COLOR=1`
@@ -215,7 +232,9 @@ filters and row-group pruning before evaluating regex.
 - `internal/sql` parses SQL and builds its Substrait plan.
 - `internal/schema` owns shared schema loading, field validation, and typed literals.
 - `internal/predicate` supplies the shared regex extension.
-- `internal/query` builds flag-based plans and evaluates the generated plan's expression over Arrow arrays.
+- `internal/filter` builds plans from single-column filter settings.
+- `internal/query` executes Substrait plans over Arrow arrays, independently of
+  the SQL and filter front ends.
   This is a small custom executor: Substrait supplies the plan representation.
 - The named table in the plan is bound to the local file supplied to the CLI.
   `--explain` reads the file schema but does not scan rows.

@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	filterquery "github.com/wolfeidau/parquet-arrow-search/internal/filter"
 	"github.com/wolfeidau/parquet-arrow-search/internal/query"
 	sqlquery "github.com/wolfeidau/parquet-arrow-search/internal/sql"
 )
@@ -72,7 +73,7 @@ func TestGenericFilterAndSQLAgree(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%s/%d", tc.column, tc.value), func(t *testing.T) {
 			var filter, sql bytes.Buffer
-			if _, err := query.Run(t.Context(), &filter, query.WithFile(path), query.WithColumn(tc.column), query.WithOperator("eq"), query.WithValue(tc.value), query.WithBatchSize(1)); err != nil {
+			if _, err := query.Run(t.Context(), &filter, query.WithFile(path), query.WithPlanBuilder(filterquery.Planner(filterquery.Config{Column: tc.column, Op: "eq", Value: tc.value})), query.WithBatchSize(1)); err != nil {
 				t.Fatal(err)
 			}
 			text := fmt.Sprintf("SELECT * FROM logs WHERE %s = %d", tc.column, tc.value)
@@ -89,7 +90,7 @@ func TestGenericFilterAndSQLAgree(t *testing.T) {
 		count int
 	}{{"pear", 1}, {"", 0}} {
 		var filter, sql bytes.Buffer
-		if _, err := query.Run(t.Context(), &filter, query.WithFile(path), query.WithColumn("product"), query.WithOperator("eq"), query.WithStringValue(tc.value)); err != nil {
+		if _, err := query.Run(t.Context(), &filter, query.WithFile(path), query.WithPlanBuilder(filterquery.Planner(filterquery.Config{Column: "product", Op: "eq", StringValue: &tc.value}))); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := query.Run(t.Context(), &sql, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner(fmt.Sprintf("SELECT * FROM logs WHERE product = '%s'", tc.value)))); err != nil {
@@ -113,7 +114,7 @@ func TestGenericFiltersRejectWrongTypesAndOverflow(t *testing.T) {
 		{"product", 1},
 	} {
 		for _, opts := range [][]query.Option{
-			{query.WithColumn(tc.column), query.WithValue(tc.value)},
+			{query.WithPlanBuilder(filterquery.Planner(filterquery.Config{Column: tc.column, Value: tc.value}))},
 			{query.WithPlanBuilder(sqlquery.Planner(fmt.Sprintf("SELECT * FROM logs WHERE %s = %d", tc.column, tc.value)))},
 		} {
 			var out bytes.Buffer
@@ -126,7 +127,8 @@ func TestGenericFiltersRejectWrongTypesAndOverflow(t *testing.T) {
 			}
 		}
 	}
-	if _, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithColumn("small"), query.WithStringValue("1")); err == nil {
+	wrongType := "1"
+	if _, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithPlanBuilder(filterquery.Planner(filterquery.Config{Column: "small", StringValue: &wrongType}))); err == nil {
 		t.Error("accepted string for integer column")
 	}
 }

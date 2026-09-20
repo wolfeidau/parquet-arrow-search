@@ -37,12 +37,12 @@ func TestComparisons(t *testing.T) {
 		op   string
 		want []int64
 	}{
-		{"eq", []int64{2}}, {"ne", []int64{1, 3}}, {"gt", []int64{3}},
-		{"ge", []int64{2, 3}}, {"lt", []int64{1}}, {"le", []int64{1, 2}},
+		{"equal", []int64{2}}, {"not_equal", []int64{1, 3}}, {"gt", []int64{3}},
+		{"gte", []int64{2, 3}}, {"lt", []int64{1}}, {"lte", []int64{1, 2}},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
 			var out bytes.Buffer
-			_, err := Run(t.Context(), &out, WithFile(path), WithColumn("age"), WithOperator(tc.op), WithValue(37), WithBatchSize(2))
+			_, err := Run(t.Context(), &out, WithFile(path), WithPlanBuilder(agePlanner(tc.op, 37)), WithBatchSize(2))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +67,7 @@ func TestComparisons(t *testing.T) {
 }
 
 func TestExplainAndValidation(t *testing.T) {
-	opts := []Option{WithFile(fixture(t)), WithColumn("age"), WithOperator("ge"), WithValue(37), WithBatchSize(2), WithExplain(true)}
+	opts := []Option{WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 37)), WithBatchSize(2), WithExplain(true)}
 	var out bytes.Buffer
 	if _, err := Run(t.Context(), &out, opts...); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestExplainAndValidation(t *testing.T) {
 		t.Fatalf("invalid plan: %s", &out)
 	}
 	for _, override := range []Option{
-		WithColumn("missing"), WithColumn("name"), WithOperator("bad"),
+		WithPlanBuilder(nil),
 		WithBatchSize(0), WithFile("missing.parquet"),
 	} {
 		bad := append(append([]Option(nil), opts...), override)
@@ -97,7 +97,7 @@ type brokenWriter struct{}
 func (brokenWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestOutputAndNoMatches(t *testing.T) {
-	opts := []Option{WithFile(fixture(t)), WithColumn("age"), WithOperator("ge"), WithValue(100), WithBatchSize(1)}
+	opts := []Option{WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 100)), WithBatchSize(1)}
 	var out bytes.Buffer
 	if _, err := Run(t.Context(), &out, opts...); err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestOutputAndNoMatches(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("expected no matches, got %s", &out)
 	}
-	opts = append(opts, WithValue(0))
+	opts = append(opts, WithPlanBuilder(agePlanner("gte", 0)))
 	if _, err := Run(t.Context(), brokenWriter{}, opts...); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("got %v", err)
 	}

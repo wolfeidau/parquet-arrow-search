@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wolfeidau/parquet-arrow-search/internal/filter"
 	"github.com/wolfeidau/parquet-arrow-search/internal/query"
 )
 
@@ -19,7 +20,7 @@ func TestLogSamples(t *testing.T) {
 	for _, path := range files {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			var output bytes.Buffer
-			if _, err := query.Run(t.Context(), &output, query.WithFile(path), query.WithColumn("content"), query.WithOperator("regex"), query.WithBatchSize(128)); err != nil {
+			if _, err := query.Run(t.Context(), &output, query.WithFile(path), query.WithPlanBuilder(filter.Planner(filter.Config{Column: "content", Op: "regex"})), query.WithBatchSize(128)); err != nil {
 				t.Fatal(err)
 			}
 			dec := json.NewDecoder(&output)

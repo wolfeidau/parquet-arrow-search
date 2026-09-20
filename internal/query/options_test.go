@@ -14,7 +14,7 @@ import (
 func TestRunDefaults(t *testing.T) {
 	var output, logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	result, err := Run(t.Context(), &output, WithFile(fixture(t)), WithColumn("age"), WithLogger(logger))
+	result, err := Run(t.Context(), &output, WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 0)), WithLogger(logger))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,13 +27,12 @@ func TestRunDefaults(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("engine logged summary: %s", &logs)
 	}
-
 }
 
 func TestOptionOverrides(t *testing.T) {
-	opts := []Option{WithFile(fixture(t)), WithColumn("age"), WithValue(100), WithExplain(true)}
+	opts := []Option{WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 100)), WithExplain(true)}
 	var output bytes.Buffer
-	opts = append(opts, WithValue(37), WithExplain(false), WithOperator("eq"), WithLogger(nil))
+	opts = append(opts, WithPlanBuilder(agePlanner("equal", 37)), WithExplain(false), WithLogger(nil))
 	if _, err := Run(t.Context(), &output, opts...); err != nil {
 		t.Fatal(err)
 	}
@@ -41,16 +40,16 @@ func TestOptionOverrides(t *testing.T) {
 		t.Fatalf("unexpected output: %s", got)
 	}
 	for _, size := range []int64{0, -1} {
-		if _, err := Run(t.Context(), io.Discard, WithFile(fixture(t)), WithColumn("age"), WithBatchSize(size)); err == nil {
+		if _, err := Run(t.Context(), io.Discard, WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 0)), WithBatchSize(size)); err == nil {
 			t.Errorf("accepted batch size %d", size)
 		}
 	}
 }
 
 func TestRequiredOptions(t *testing.T) {
-	for _, opts := range [][]Option{nil, {WithFile(fixture(t))}, {WithColumn("age")}} {
+	for _, opts := range [][]Option{nil, {WithFile(fixture(t))}, {WithPlanBuilder(agePlanner("gte", 0))}, {WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 0)), WithPlanBuilder(nil)}} {
 		if _, err := Run(t.Context(), io.Discard, opts...); err == nil {
-			t.Fatal("accepted missing file or column")
+			t.Fatal("accepted missing file or plan builder")
 		}
 	}
 }

@@ -16,13 +16,11 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-const regexOp = "regex"
-
 // Run builds a Substrait plan from the file schema, then explains or executes it.
 // Output is newline-delimited JSON; callers may receive partial output on error.
 // The returned result includes partial counts and elapsed time through cleanup.
-// Defaults: ge comparison against zero, 65,536 rows per batch, no query logs.
-// WithFile and either WithPlanBuilder or WithColumn are required.
+// Defaults: 65,536 rows per batch, no query logs.
+// WithFile and WithPlanBuilder are required.
 func Run(ctx context.Context, out io.Writer, options ...Option) (result Result, err error) {
 	opts := defaultOptions()
 	for _, option := range options {
@@ -40,25 +38,13 @@ func Run(ctx context.Context, out io.Writer, options ...Option) (result Result, 
 		result.Explain = opts.Explain
 	}()
 
-	startAttrs := []slog.Attr{
+	logger.DebugContext(ctx, "starting query",
 		slog.String("file", opts.File),
 		slog.Int64("batch_size", opts.BatchSize),
-	}
-	if opts.PlanBuilder != nil {
-		startAttrs = append(startAttrs, slog.String("mode", "planned"))
-	} else {
-		startAttrs = append(startAttrs,
-			slog.String("column", opts.Column),
-			slog.String("operator", opts.Op),
-		)
-	}
-	logger.LogAttrs(ctx, slog.LevelDebug, "starting query", startAttrs...)
+	)
 
-	if opts.File == "" || (opts.PlanBuilder == nil && opts.Column == "") {
-		return result, fmt.Errorf("file and either plan builder or column are required")
-	}
-	if opts.PlanBuilder != nil && opts.filterConfigured {
-		return result, fmt.Errorf("plan builder cannot be combined with column, operator, pattern, or value options")
+	if opts.File == "" || opts.PlanBuilder == nil {
+		return result, fmt.Errorf("file and plan builder are required")
 	}
 	if opts.BatchSize <= 0 {
 		return result, fmt.Errorf("batch size must be positive")
@@ -80,9 +66,13 @@ func Run(ctx context.Context, out io.Writer, options ...Option) (result Result, 
 	fileSchema := source.Schema
 	logger.DebugContext(ctx, "read parquet schema", slog.Int("columns", len(fileSchema.Fields())))
 
-	p, err := buildPlan(fileSchema, opts)
+	p, err := opts.PlanBuilder(fileSchema)
 	if err != nil {
 		return result, fmt.Errorf("build Substrait plan: %w", err)
+	}
+
+	if p == nil {
+		return result, fmt.Errorf("plan builder returned a nil plan")
 	}
 
 	execution, err := compilePlan(p, fileSchema)

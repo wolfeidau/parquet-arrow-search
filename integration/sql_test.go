@@ -122,13 +122,8 @@ func TestSQLLimitResult(t *testing.T) {
 	}
 }
 
-func TestSQLModeAndErrors(t *testing.T) {
+func TestSQLOutputErrorsAndCancellation(t *testing.T) {
 	path := fixture(t)
-	for _, legacy := range []query.Option{query.WithColumn("age"), query.WithOperator("ge"), query.WithValue(0), query.WithPattern("")} {
-		if _, err := query.Run(t.Context(), io.Discard, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner("SELECT * FROM logs")), legacy); err == nil {
-			t.Fatal("accepted mixed query modes")
-		}
-	}
 
 	for _, explain := range []bool{false, true} {
 		_, err := query.Run(t.Context(), brokenWriter{}, query.WithFile(path), query.WithPlanBuilder(sqlquery.Planner("SELECT * FROM logs")), query.WithExplain(explain))

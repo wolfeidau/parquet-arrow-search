@@ -11,6 +11,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
+	"github.com/wolfeidau/parquet-arrow-search/internal/filter"
 	"github.com/wolfeidau/parquet-arrow-search/internal/query"
 	"github.com/wolfeidau/parquet-arrow-search/internal/sql"
 )
@@ -88,6 +89,16 @@ func main() {
 		NoColor: os.Getenv("NO_COLOR") != "",
 	}))
 
+	if args.Query.Query != "" {
+		logger = logger.With(slog.String("mode", "query"))
+	} else {
+		logger = logger.With(
+			slog.String("mode", "filter"),
+			slog.String("column", args.Filter.Column),
+			slog.String("operator", args.Filter.Op),
+		)
+	}
+
 	if err := run(logger, args.options(logger)...); err != nil {
 		logger.Error("query failed", slog.Any("error", err))
 		os.Exit(1)
@@ -106,20 +117,19 @@ func (c *cli) options(logger *slog.Logger) []query.Option {
 		return append(opts, query.WithPlanBuilder(sql.Planner(c.Query.Query)))
 	}
 
-	opts = append(opts,
-		query.WithColumn(c.Filter.Column),
-		query.WithOperator(c.Filter.Op),
-	)
+	config := filter.Config{
+		Column:      c.Filter.Column,
+		Op:          c.Filter.Op,
+		StringValue: c.Filter.StringValue,
+	}
 	if c.Filter.Pattern != nil {
-		opts = append(opts, query.WithPattern(*c.Filter.Pattern))
+		config.Pattern = *c.Filter.Pattern
 	}
 	if c.Filter.Value != nil {
-		opts = append(opts, query.WithValue(*c.Filter.Value))
+		config.Value = *c.Filter.Value
 	}
-	if c.Filter.StringValue != nil {
-		opts = append(opts, query.WithStringValue(*c.Filter.StringValue))
-	}
-	return opts
+
+	return append(opts, query.WithPlanBuilder(filter.Planner(config)))
 }
 
 func run(logger *slog.Logger, opts ...query.Option) error {

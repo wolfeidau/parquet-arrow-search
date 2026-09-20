@@ -33,8 +33,7 @@ func TestRunResult(t *testing.T) {
 			logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			result, err := Run(t.Context(), out,
 				WithFile(path),
-				WithColumn("age"),
-				WithValue(30),
+				WithPlanBuilder(agePlanner("gte", 30)),
 				WithBatchSize(2),
 				WithExplain(tc.explain),
 				WithLogger(logger),
@@ -75,9 +74,9 @@ func TestRunResultBeforeScanning(t *testing.T) {
 		ctx  context.Context
 		opts []Option
 	}{
-		{"missing file", t.Context(), []Option{WithFile("missing.parquet"), WithColumn("age")}},
+		{"missing file", t.Context(), []Option{WithFile("missing.parquet"), WithPlanBuilder(agePlanner("gte", 0))}},
 		{"invalid options", t.Context(), nil},
-		{"cancelled", ctx, []Option{WithFile(fixture(t)), WithColumn("age")}},
+		{"cancelled", ctx, []Option{WithFile(fixture(t)), WithPlanBuilder(agePlanner("gte", 0))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := Run(tc.ctx, io.Discard, append(tc.opts, WithExplain(true))...)
@@ -106,7 +105,7 @@ func TestRunResultAfterCancellation(t *testing.T) {
 
 	result, err := Run(ctx, cancellingOutput{cancel: cancel},
 		WithFile(fixture(t)),
-		WithColumn("age"),
+		WithPlanBuilder(agePlanner("gte", 0)),
 		WithBatchSize(2),
 	)
 	if !errors.Is(err, context.Canceled) {
